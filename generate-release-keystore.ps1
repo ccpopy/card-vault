@@ -1,9 +1,38 @@
 param(
     [string]$EnvFile = (Join-Path $PSScriptRoot '.env'),
+    [switch]$InitEnv,
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
+
+function New-RandomSecret {
+    $bytes = New-Object byte[] 48
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+if ($InitEnv) {
+    if ((Test-Path -LiteralPath $EnvFile) -and -not $Force) {
+        throw "Env file already exists: $EnvFile. Re-run with -Force only if you intentionally want to replace it."
+    }
+
+    $releasePassword = New-RandomSecret
+    @(
+        '# Local release signing config. Do not commit this file.',
+        "ANDROID_KEYSTORE_PASSWORD=$releasePassword",
+        "ANDROID_KEY_PASSWORD=$releasePassword",
+        'ANDROID_KEY_ALIAS=cardvault',
+        'ANDROID_DISTINGUISHED_NAME=CN=CardVault,O=CardVault,C=CN'
+    ) | Set-Content -LiteralPath $EnvFile -Encoding UTF8
+
+    Write-Host "Generated env file: $EnvFile"
+}
 
 function Read-DotEnv {
     param([string]$Path)
@@ -67,8 +96,13 @@ $DistinguishedName = if ($envValues.ContainsKey('ANDROID_DISTINGUISHED_NAME') -a
     'CN=CardVault,O=CardVault,C=CN'
 }
 
+if ($KeyPassword -ne $KeystorePassword) {
+    throw 'PKCS12 release keystore uses one password. Set ANDROID_KEY_PASSWORD equal to ANDROID_KEYSTORE_PASSWORD.'
+}
+
 $OutputDir = Join-Path $PSScriptRoot 'release-signing'
-$KeystorePath = Join-Path $OutputDir 'cardvault-release.jks'
+$KeystorePath = Join-Path $OutputDir 'cardvault-release.p12'
+$LegacyKeystorePath = Join-Path $OutputDir 'cardvault-release.jks'
 $Base64Path = Join-Path $OutputDir 'cardvault-release.base64.txt'
 
 if ((Test-Path -LiteralPath $KeystorePath) -and -not $Force) {
@@ -103,22 +137,41 @@ if ($null -eq $keytool) {
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-if ((Test-Path -LiteralPath $KeystorePath) -and $Force) {
+if ($Force -and (Test-Path -LiteralPath $KeystorePath)) {
     Remove-Item -LiteralPath $KeystorePath -Force
 }
 
-& $keytool `
-    -genkeypair `
-    -v `
-    -keystore $KeystorePath `
-    -storetype JKS `
-    -storepass $KeystorePassword `
-    -keypass $KeyPassword `
-    -alias $KeyAlias `
-    -keyalg RSA `
-    -keysize 4096 `
-    -validity 10000 `
-    -dname $DistinguishedName
+if ($Force -and (Test-Path -LiteralPath $LegacyKeystorePath)) {
+    Remove-Item -LiteralPath $LegacyKeystorePath -Force
+}
+
+if (Test-Path -LiteralPath $LegacyKeystorePath) {
+    Write-Host "Migrating existing JKS keystore to PKCS12: $LegacyKeystorePath"
+    & $keytool `
+        -importkeystore `
+        -srckeystore $LegacyKeystorePath `
+        -srcstoretype JKS `
+        -srcstorepass $KeystorePassword `
+        -srckeypass $KeyPassword `
+        -srcalias $KeyAlias `
+        -destkeystore $KeystorePath `
+        -deststoretype PKCS12 `
+        -deststorepass $KeystorePassword `
+        -destalias $KeyAlias `
+        -noprompt
+} else {
+    & $keytool `
+        -genkeypair `
+        -v `
+        -keystore $KeystorePath `
+        -storetype PKCS12 `
+        -storepass $KeystorePassword `
+        -alias $KeyAlias `
+        -keyalg RSA `
+        -keysize 4096 `
+        -validity 10000 `
+        -dname $DistinguishedName
+}
 
 if ($LASTEXITCODE -ne 0) {
     throw "keytool failed with exit code $LASTEXITCODE."

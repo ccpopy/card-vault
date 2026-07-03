@@ -1,9 +1,13 @@
 package com.cardvault.app.ui
 
+import android.net.Uri
+import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -15,6 +19,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.cardvault.app.AppContainer
 import com.cardvault.app.data.AppSettings
+import com.cardvault.app.nfc.NfcCardDraft
+import com.cardvault.app.nfc.NfcImportEvent
 import com.cardvault.app.ui.edit.EditCardScreen
 import com.cardvault.app.ui.edit.EditCardViewModel
 import com.cardvault.app.ui.home.HomeScreen
@@ -53,6 +59,27 @@ fun AppRoot(container: AppContainer) {
 @Composable
 private fun MainNavHost(container: AppContainer, settings: AppSettings) {
     val navController = rememberNavController()
+    val context = LocalContext.current
+
+    LaunchedEffect(navController) {
+        container.nfcImportController.events.collect { event ->
+            when (event) {
+                is NfcImportEvent.CardRead -> {
+                    val draft = event.draft
+                    Toast.makeText(context, "已读取 NFC 卡片", Toast.LENGTH_SHORT).show()
+                    navController.navigate(
+                        "edit?cardId=-1" +
+                            "&nfcNumber=${Uri.encode(draft.number)}" +
+                            "&nfcExpiryMonth=${draft.expiryMonth ?: -1}" +
+                            "&nfcExpiryYear=${draft.expiryYear ?: -1}"
+                    )
+                }
+                is NfcImportEvent.Error -> {
+                    Toast.makeText(context, event.message, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
 
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
@@ -68,19 +95,44 @@ private fun MainNavHost(container: AppContainer, settings: AppSettings) {
         }
 
         composable(
-            route = "edit?cardId={cardId}",
-            arguments = listOf(navArgument("cardId") {
-                type = NavType.LongType
-                defaultValue = -1L
-            }),
+            route = "edit?cardId={cardId}&nfcNumber={nfcNumber}&nfcExpiryMonth={nfcExpiryMonth}&nfcExpiryYear={nfcExpiryYear}",
+            arguments = listOf(
+                navArgument("cardId") {
+                    type = NavType.LongType
+                    defaultValue = -1L
+                },
+                navArgument("nfcNumber") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+                navArgument("nfcExpiryMonth") {
+                    type = NavType.IntType
+                    defaultValue = -1
+                },
+                navArgument("nfcExpiryYear") {
+                    type = NavType.IntType
+                    defaultValue = -1
+                },
+            ),
         ) { backStackEntry ->
             val cardId = backStackEntry.arguments?.getLong("cardId") ?: -1L
-            val vm: EditCardViewModel = viewModel(key = "edit_$cardId") {
+            val nfcNumber = backStackEntry.arguments?.getString("nfcNumber").orEmpty()
+            val nfcExpiryMonth = backStackEntry.arguments?.getInt("nfcExpiryMonth") ?: -1
+            val nfcExpiryYear = backStackEntry.arguments?.getInt("nfcExpiryYear") ?: -1
+            val nfcDraft = nfcNumber.takeIf { it.isNotBlank() }?.let {
+                NfcCardDraft(
+                    number = it,
+                    expiryMonth = nfcExpiryMonth.takeIf { value -> value in 1..12 },
+                    expiryYear = nfcExpiryYear.takeIf { value -> value > 0 },
+                )
+            }
+            val vm: EditCardViewModel = viewModel(key = "edit_${cardId}_${nfcNumber}") {
                 EditCardViewModel(
                     repo = container.cardRepository,
                     binService = container.binLookupService,
                     settingsRepo = container.settingsRepository,
                     cardId = cardId,
+                    initialDraft = nfcDraft,
                 )
             }
             EditCardScreen(
@@ -92,7 +144,13 @@ private fun MainNavHost(container: AppContainer, settings: AppSettings) {
 
         composable("settings") {
             val vm: SettingsViewModel = viewModel {
-                SettingsViewModel(container.settingsRepository, container.binLookupService)
+                SettingsViewModel(
+                    settingsRepo = container.settingsRepository,
+                    binService = container.binLookupService,
+                    updateService = container.updateService,
+                    backupManager = container.backupManager,
+                    notificationScheduler = container.expiryNotificationScheduler,
+                )
             }
             SettingsScreen(
                 vm = vm,

@@ -22,6 +22,8 @@ data class AppSettings(
     val secureScreen: Boolean = true,
     /** system / light / dark */
     val themeMode: String = "system",
+    /** 是否启用本地到期通知 */
+    val expiryNotifications: Boolean = false,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -34,6 +36,7 @@ class SettingsRepository(private val context: Context) {
         private val KEY_CLIP_CLEAR = intPreferencesKey("clipboard_clear_seconds")
         private val KEY_SECURE = booleanPreferencesKey("secure_screen")
         private val KEY_THEME = stringPreferencesKey("theme_mode")
+        private val KEY_EXPIRY_NOTIFICATIONS = booleanPreferencesKey("expiry_notifications")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
@@ -44,6 +47,7 @@ class SettingsRepository(private val context: Context) {
             clipboardClearSeconds = p[KEY_CLIP_CLEAR] ?: 30,
             secureScreen = p[KEY_SECURE] ?: true,
             themeMode = p[KEY_THEME] ?: "system",
+            expiryNotifications = p[KEY_EXPIRY_NOTIFICATIONS] ?: false,
         )
     }
 
@@ -53,4 +57,6 @@ class SettingsRepository(private val context: Context) {
     suspend fun setClipboardClearSeconds(v: Int) = context.dataStore.edit { it[KEY_CLIP_CLEAR] = v }
     suspend fun setSecureScreen(v: Boolean) = context.dataStore.edit { it[KEY_SECURE] = v }
     suspend fun setThemeMode(v: String) = context.dataStore.edit { it[KEY_THEME] = v }
+    suspend fun setExpiryNotifications(v: Boolean) =
+        context.dataStore.edit { it[KEY_EXPIRY_NOTIFICATIONS] = v }
 }

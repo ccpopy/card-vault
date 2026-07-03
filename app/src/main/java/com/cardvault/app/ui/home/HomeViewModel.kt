@@ -35,6 +35,7 @@ class HomeViewModel(private val repo: CardRepository) : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     fun delete(card: CardEntity) = viewModelScope.launch { repo.delete(card) }
+    fun reorder(orderedIds: List<Long>) = viewModelScope.launch { repo.reorder(orderedIds) }
 
     private fun statusOf(card: CardEntity) =
         CardValidation.expiryStatus(card.expiryMonth, card.expiryYear)

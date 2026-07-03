@@ -10,6 +10,7 @@ import com.cardvault.app.data.CardRepository
 import com.cardvault.app.data.SettingsRepository
 import com.cardvault.app.domain.BankDirectory
 import com.cardvault.app.domain.CardBrand
+import com.cardvault.app.nfc.NfcCardDraft
 import com.cardvault.app.network.BinLookupService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -27,6 +28,7 @@ class EditCardViewModel(
     private val binService: BinLookupService,
     private val settingsRepo: SettingsRepository,
     private val cardId: Long,
+    initialDraft: NfcCardDraft? = null,
 ) : ViewModel() {
 
     var loaded by mutableStateOf(cardId <= 0)
@@ -43,6 +45,7 @@ class EditCardViewModel(
         private set
     var alias by mutableStateOf("")
     var styleId by mutableStateOf<String?>(null)
+    private var orderPosition by mutableStateOf(0L)
 
     /** 手动指定卡组织；null = 按卡号自动识别 */
     var brandOverride by mutableStateOf<CardBrand?>(null)
@@ -68,12 +71,22 @@ class EditCardViewModel(
                 bankCode = c.bankCode
                 alias = c.alias
                 styleId = c.styleId
+                orderPosition = c.orderPosition
                 val detected = CardBrand.detect(c.number)
                 brandOverride = CardBrand.fromName(c.brand).takeIf { it != detected }
                 bankEdited = c.bankName.isNotBlank() &&
                     c.bankName != BankDirectory.findBank(c.number)?.name
             }
             loaded = true
+        } else if (initialDraft != null) {
+            applyNfcDraft(initialDraft)
+        }
+    }
+
+    private fun applyNfcDraft(draft: NfcCardDraft) {
+        onNumberChange(draft.number)
+        if (draft.expiryMonth != null && draft.expiryYear != null) {
+            expiryRaw = "%02d%02d".format(draft.expiryMonth, draft.expiryYear % 100)
         }
     }
 
@@ -151,6 +164,7 @@ class EditCardViewModel(
         bankCode = bankCode,
         alias = alias.trim(),
         styleId = styleId,
+        orderPosition = orderPosition,
         createdAt = 0,
         updatedAt = 0,
     )

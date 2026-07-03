@@ -22,8 +22,8 @@ android {
         applicationId = "com.cardvault.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.1.0"
     }
 
     signingConfigs {
@@ -68,6 +68,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     splits {
         abi {
@@ -121,6 +122,9 @@ dependencies {
 
     // 设置持久化
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    // 本地到期提醒
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 
     // 生物识别
     implementation("androidx.biometric:biometric:1.2.0-alpha05")

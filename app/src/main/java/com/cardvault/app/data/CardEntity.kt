@@ -24,6 +24,8 @@ data class CardEntity(
     val alias: String = "",
     /** 卡面样式 id；null = 自动 */
     val styleId: String? = null,
+    /** 用户自定义排序；数值越小越靠前 */
+    val orderPosition: Long = 0,
     val createdAt: Long,
     val updatedAt: Long,
 )

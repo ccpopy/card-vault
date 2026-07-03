@@ -1,6 +1,11 @@
 package com.cardvault.app.ui.home
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -9,6 +14,8 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,7 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -58,25 +65,39 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.cardvault.app.AppContainer
 import com.cardvault.app.data.AppSettings
 import com.cardvault.app.data.CardEntity
 import com.cardvault.app.domain.CardBrand
 import com.cardvault.app.domain.CardStyles
 import com.cardvault.app.domain.CardValidation
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -95,9 +116,121 @@ fun HomeScreen(
 
     var detailCard by remember { mutableStateOf<CardEntity?>(null) }
     var showDetail by remember { mutableStateOf(false) }
+    val canReorder = filter == CardFilter.ALL && query.isBlank()
+
+    val haptics = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    val density = LocalDensity.current
+    // 钱包式堆叠的重叠高度；相邻两张卡顶部的间距 = 卡片实测高度 - stackOverlap
+    val stackOverlap = 136.dp
+    val stackOverlapPx = with(density) { stackOverlap.toPx() }
+    val edgeZonePx = with(density) { 92.dp.toPx() }
+    val maxAutoScrollPxPerSec = with(density) { 540.dp.toPx() }
+
+    // 拖拽排序（仿 Apple 钱包）：liftedId 表示手指仍按住的卡，
+    // draggingId 表示位移仍归手动控制的卡——松手后回弹期间依然持有，动画结束才交还
+    var liftedId by remember { mutableStateOf<Long?>(null) }
+    var draggingId by remember { mutableStateOf<Long?>(null) }
+    var workingOrder by remember { mutableStateOf<List<CardEntity>?>(null) }
+    var dragOffsetPx by remember { mutableFloatStateOf(0f) }
+    var itemHeightPx by remember { mutableIntStateOf(0) }
+    var autoScrollVelocity by remember { mutableFloatStateOf(0f) }
+    var settleJob by remember { mutableStateOf<Job?>(null) }
 
     // 详情中的卡被编辑/删除后同步刷新
     val liveDetail = detailCard?.let { d -> cards.firstOrNull { it.id == d.id } ?: d }
+    // 拖拽期间渲染本地顺序；落库回流后再切回数据库顺序，两者一致所以不会闪跳
+    val displayCards = workingOrder ?: cards
+
+    // 越过半格即交换位置（邻卡由 animateItem 弹簧让位），并同步修正位移，
+    // 保证被拖的卡始终吸在手指下而不是跳格
+    fun applyDragSwaps() {
+        val id = draggingId ?: return
+        var order = workingOrder ?: return
+        val step = itemHeightPx - stackOverlapPx
+        if (step <= 0f) return
+        var index = order.indexOfFirst { it.id == id }
+        if (index < 0) return
+        var offset = dragOffsetPx
+        var moved = false
+        while (offset > step / 2f && index < order.lastIndex) {
+            order = order.move(index, index + 1); index++; offset -= step; moved = true
+        }
+        while (offset < -step / 2f && index > 0) {
+            order = order.move(index, index - 1); index--; offset += step; moved = true
+        }
+        if (moved) {
+            workingOrder = order
+            dragOffsetPx = offset
+            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        }
+    }
+
+    // 拖近列表上下边缘时自动滚动，越深入越快
+    fun updateAutoScroll() {
+        val id = draggingId ?: run { autoScrollVelocity = 0f; return }
+        val info = listState.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.key == id }
+            ?: run { autoScrollVelocity = 0f; return }
+        val top = item.offset + dragOffsetPx
+        val bottom = top + item.size
+        autoScrollVelocity = when {
+            top < info.viewportStartOffset + edgeZonePx ->
+                -maxAutoScrollPxPerSec *
+                    ((info.viewportStartOffset + edgeZonePx - top) / edgeZonePx).coerceAtMost(1f)
+            bottom > info.viewportEndOffset - edgeZonePx ->
+                maxAutoScrollPxPerSec *
+                    ((bottom - (info.viewportEndOffset - edgeZonePx)) / edgeZonePx).coerceAtMost(1f)
+            else -> 0f
+        }
+    }
+
+    // 松手：立即落库（防中途退出丢顺序），再用弹簧把残余位移收敛进槽位；
+    // zIndex 随手指抬起已还原，回弹过程视觉上是“插回卡包”
+    fun finishDrag() {
+        liftedId = null
+        autoScrollVelocity = 0f
+        val order = workingOrder
+        if (order != null && order.map { it.id } != cards.map { it.id }) {
+            vm.reorder(order.map { it.id })
+        }
+        settleJob = scope.launch {
+            animate(
+                initialValue = dragOffsetPx,
+                targetValue = 0f,
+                animationSpec = spring(dampingRatio = 0.78f, stiffness = 430f),
+            ) { value, _ -> dragOffsetPx = value }
+            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            draggingId = null
+            if (workingOrder?.map { it.id } == cards.map { it.id }) workingOrder = null
+        }
+    }
+
+    // 数据库顺序回流且不在拖拽中时丢弃本地顺序（回弹中到达的排队到 finishDrag 末尾处理）
+    LaunchedEffect(cards) {
+        if (draggingId == null) workingOrder = null
+    }
+
+    // 边缘自动滚动：手指停住也持续滚；滚动量补偿进位移，让卡钉在手指下
+    LaunchedEffect(draggingId) {
+        if (draggingId == null) return@LaunchedEffect
+        var lastFrameNanos = 0L
+        while (true) {
+            val now = withFrameNanos { it }
+            val dt = if (lastFrameNanos == 0L) 0f else (now - lastFrameNanos) / 1_000_000_000f
+            lastFrameNanos = now
+            val velocity = autoScrollVelocity
+            if (velocity != 0f && dt > 0f) {
+                val consumed = listState.scrollBy(velocity * dt)
+                if (consumed != 0f) {
+                    dragOffsetPx += consumed
+                    applyDragSwaps()
+                }
+                updateAutoScroll()
+            }
+        }
+    }
 
     Scaffold(
         floatingActionButton = {
@@ -151,11 +284,9 @@ fun HomeScreen(
                 }
             }
 
-            if (cards.isEmpty()) {
+            if (displayCards.isEmpty()) {
                 EmptyHint(filter, query)
             } else {
-                // 钱包式堆叠：负间距让卡片相互覆盖，只露出每张的顶部
-                val listState = rememberLazyListState()
                 // 搜索词/筛选变化后列表数据集变了，旧的滚动锚点会把内容顶出屏幕，
                 // 统一回到顶部（修复：删除搜索词后卡片被顶上去，收起键盘才恢复）
                 LaunchedEffect(query, filter) { listState.scrollToItem(0) }
@@ -163,16 +294,85 @@ fun HomeScreen(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 120.dp),
-                    verticalArrangement = Arrangement.spacedBy((-136).dp),
+                    // 钱包式堆叠：负间距让卡片相互覆盖，只露出每张的顶部
+                    verticalArrangement = Arrangement.spacedBy(-stackOverlap),
                 ) {
-                    items(cards, key = { it.id }) { card ->
+                    itemsIndexed(displayCards, key = { _, c -> c.id }) { index, card ->
                         val preset = CardStyles.resolve(
                             card.styleId, card.bankCode, CardBrand.fromName(card.brand)
                         )
+                        val lifted = liftedId == card.id
+                        // 拎起：轻微放大 + 阴影加深；抬手立即回落，与位移回弹并行
+                        val liftScale by animateFloatAsState(
+                            targetValue = if (lifted) 1.045f else 1f,
+                            animationSpec = spring(dampingRatio = 0.6f, stiffness = 720f),
+                            label = "liftScale",
+                        )
+                        val liftElevation by animateDpAsState(
+                            targetValue = if (lifted) 26.dp else 8.dp,
+                            animationSpec = spring(dampingRatio = 0.9f, stiffness = 480f),
+                            label = "liftElevation",
+                        )
+                        val dragModifier = if (canReorder) {
+                            Modifier.pointerInput(card.id) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = {
+                                        settleJob?.cancel()
+                                        // 回弹途中再次拎起同一张卡：保留残余位移接着拖，不跳变
+                                        if (draggingId != card.id) dragOffsetPx = 0f
+                                        liftedId = card.id
+                                        draggingId = card.id
+                                        workingOrder = workingOrder ?: cards
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        if (draggingId == card.id) {
+                                            dragOffsetPx += dragAmount.y
+                                            applyDragSwaps()
+                                            updateAutoScroll()
+                                        }
+                                    },
+                                    onDragEnd = { finishDrag() },
+                                    onDragCancel = { finishDrag() },
+                                )
+                            }
+                        } else {
+                            Modifier
+                        }
                         Box(
                             Modifier
                                 .fillMaxWidth()
-                                .shadow(8.dp, RoundedCornerShape(20.dp))
+                                // 按住期间浮在最上层；抬手即还原，回弹时卡片滑入下方卡片底下，
+                                // 视觉上像插回卡包（zIndex 若持续到动画结束，收尾会有一次遮挡跳变）
+                                .zIndex(if (lifted) 1f else 0f)
+                                .then(
+                                    if (draggingId == card.id) Modifier
+                                    else Modifier.animateItem(
+                                        fadeInSpec = null,
+                                        fadeOutSpec = null,
+                                        placementSpec = spring(
+                                            dampingRatio = 0.82f,
+                                            stiffness = 380f,
+                                            visibilityThreshold = IntOffset.VisibilityThreshold,
+                                        ),
+                                    )
+                                )
+                                .onSizeChanged { itemHeightPx = it.height }
+                                .then(dragModifier)
+                                .graphicsLayer {
+                                    if (draggingId == card.id) {
+                                        val raw = dragOffsetPx
+                                        // 拖出首尾之外时加阻尼，仿 iOS 橡皮筋
+                                        translationY = if (
+                                            (index == 0 && raw < 0f) ||
+                                            (index == displayCards.lastIndex && raw > 0f)
+                                        ) raw * 0.35f else raw
+                                    }
+                                    scaleX = liftScale
+                                    scaleY = liftScale
+                                }
+                                .shadow(liftElevation, RoundedCornerShape(20.dp))
                         ) {
                             BankCardFront(
                                 card = card,
@@ -219,6 +419,14 @@ fun HomeScreen(
     }
 }
 
+private fun List<CardEntity>.move(from: Int, to: Int): List<CardEntity> {
+    if (from == to) return this
+    val copy = toMutableList()
+    val item = copy.removeAt(from)
+    copy.add(to, item)
+    return copy
+}
+
 @Composable
 private fun androidx.compose.foundation.layout.BoxScope.ExpiryBadge(card: CardEntity) {
     val status = CardValidation.expiryStatus(card.expiryMonth, card.expiryYear)
@@ -235,7 +443,7 @@ private fun androidx.compose.foundation.layout.BoxScope.ExpiryBadge(card: CardEn
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier
             .align(Alignment.TopEnd)
-            .padding(top = 14.dp, end = 56.dp),
+            .padding(top = 14.dp, end = 14.dp),
     ) {
         Text(
             text,

@@ -1,5 +1,11 @@
 package com.cardvault.app.ui.settings
 
+import android.Manifest
+import android.net.Uri
+import android.os.Build
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,13 +28,17 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreditCard
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.GppGood
 import androidx.compose.material.icons.filled.GppMaybe
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Password
 import androidx.compose.material.icons.filled.Screenshot
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -49,6 +59,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,12 +70,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.cardvault.app.data.AppSettings
 import com.cardvault.app.network.BinLookupService
 import com.cardvault.app.security.PinManager
@@ -83,13 +96,66 @@ fun SettingsScreen(
     var proxyInput by rememberSaveable(settings.proxyUrl) { mutableStateOf(settings.proxyUrl) }
     val proxyValid = proxyInput.isBlank() || BinLookupService.isValidProxyUrl(proxyInput)
     var showChangePin by remember { mutableStateOf(false) }
+    var showExportBackup by remember { mutableStateOf(false) }
+    var showImportBackup by remember { mutableStateOf(false) }
+    var pendingExportPassword by remember { mutableStateOf<String?>(null) }
+    var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    var notificationPermissionDenied by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     var pinSet by remember { mutableStateOf(pinManager.isPinSet()) }
     var bioOn by remember { mutableStateOf(pinManager.isBiometricEnabled()) }
     var showPinSetup by remember { mutableStateOf(false) }
     var showDisablePin by remember { mutableStateOf(false) }
     val biometricSupported = remember { canUseBiometric(context) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val password = pendingExportPassword
+        pendingExportPassword = null
+        if (uri != null && password != null) vm.exportBackup(uri, password)
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            pendingImportUri = uri
+            showImportBackup = true
+        }
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            notificationPermissionDenied = false
+            vm.setExpiryNotifications(true)
+        } else {
+            notificationPermissionDenied = true
+        }
+    }
+
+    fun setExpiryNotificationPreference(want: Boolean) {
+        if (
+            want &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            notificationPermissionDenied = false
+            vm.setExpiryNotifications(want)
+        }
+    }
+
+    val updateState = vm.updateState
+    LaunchedEffect(updateState) {
+        if (updateState is AppUpdateState.OpenDownload) {
+            uriHandler.openUri(updateState.info.downloadUrl)
+            vm.markUpdateDownloadOpened(updateState.info)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -214,6 +280,29 @@ fun SettingsScreen(
                 }
             }
 
+            SectionLabel("提醒")
+            SectionCard {
+                SettingRow(
+                    icon = Icons.Filled.NotificationsActive,
+                    title = "到期本地通知",
+                    subtitle = "每天在本机检查即将到期和已过期卡片",
+                ) {
+                    Switch(
+                        checked = settings.expiryNotifications,
+                        onCheckedChange = ::setExpiryNotificationPreference,
+                    )
+                }
+                if (notificationPermissionDenied) {
+                    Text(
+                        "系统通知权限未授权，无法开启到期提醒。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.padding(start = 66.dp, end = 16.dp, bottom = 12.dp),
+                    )
+                }
+            }
+
             SectionLabel("网络")
             SectionCard {
                 Column(Modifier.padding(16.dp)) {
@@ -279,6 +368,102 @@ fun SettingsScreen(
 
             SectionLabel("数据")
             SectionCard {
+                SettingRow(
+                    icon = Icons.Filled.SystemUpdate,
+                    title = "检查更新",
+                    subtitle = "打开 GitHub 官方 APK 下载链接",
+                    enabled = vm.updateState != AppUpdateState.Checking,
+                    onClick = { vm.checkUpdate() },
+                ) {
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                when (val state = vm.updateState) {
+                    AppUpdateState.Checking -> {
+                        Row(
+                            Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "正在检查更新…",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 13.sp,
+                            )
+                        }
+                    }
+                    is AppUpdateState.Done -> StatusLine(
+                        state.message,
+                        MaterialTheme.colorScheme.primary,
+                        Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    )
+                    is AppUpdateState.Error -> StatusLine(
+                        state.message,
+                        MaterialTheme.colorScheme.error,
+                        Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    )
+                    else -> {}
+                }
+                RowDivider()
+                SettingRow(
+                    icon = Icons.Filled.FileDownload,
+                    title = "导出加密备份",
+                    subtitle = "用备份密码加密保存卡片数据",
+                    enabled = vm.backupState != BackupState.Working,
+                    onClick = { showExportBackup = true },
+                ) {
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                RowDivider()
+                SettingRow(
+                    icon = Icons.Filled.FileUpload,
+                    title = "导入加密备份",
+                    subtitle = "按卡号合并，同卡号更新",
+                    enabled = vm.backupState != BackupState.Working,
+                    onClick = { importLauncher.launch(arrayOf("*/*")) },
+                ) {
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                when (val state = vm.backupState) {
+                    BackupState.Working -> {
+                        Row(
+                            Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "正在处理备份…",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 13.sp,
+                            )
+                        }
+                    }
+                    is BackupState.Done -> StatusLine(
+                        state.message,
+                        MaterialTheme.colorScheme.primary,
+                        Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    )
+                    is BackupState.Error -> StatusLine(
+                        state.message,
+                        MaterialTheme.colorScheme.error,
+                        Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    )
+                    else -> {}
+                }
+                RowDivider()
                 Text(
                     "· 卡片数据仅存储于本机，采用 SQLCipher（AES-256）加密，密钥由系统 Keystore 保护。\n" +
                         "· 应用内不包含统计、广告或后台上报组件。\n" +
@@ -292,7 +477,7 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(24.dp))
             Text(
-                "CardVault 1.0.0",
+                "CardVault 1.1.0",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -317,6 +502,39 @@ fun SettingsScreen(
                 pinSet = false
             },
             onDismiss = { showDisablePin = false },
+        )
+    }
+
+    if (showExportBackup) {
+        BackupPasswordDialog(
+            title = "导出加密备份",
+            confirmText = "选择位置",
+            requireConfirm = true,
+            onConfirm = { password ->
+                pendingExportPassword = password
+                showExportBackup = false
+                exportLauncher.launch("CardVault-backup-${System.currentTimeMillis()}.cvbk")
+            },
+            onDismiss = { showExportBackup = false },
+        )
+    }
+
+    if (showImportBackup && pendingImportUri != null) {
+        BackupPasswordDialog(
+            title = "导入加密备份",
+            message = "导入会按卡号合并：同卡号更新，新卡新增，本机独有卡片保留。",
+            confirmText = "导入",
+            requireConfirm = false,
+            onConfirm = { password ->
+                val uri = pendingImportUri
+                pendingImportUri = null
+                showImportBackup = false
+                if (uri != null) vm.importBackup(uri, password)
+            },
+            onDismiss = {
+                pendingImportUri = null
+                showImportBackup = false
+            },
         )
     }
 
@@ -498,9 +716,13 @@ private fun <T> DropdownSettingRow(
 }
 
 @Composable
-private fun StatusLine(text: String, color: androidx.compose.ui.graphics.Color) {
+private fun StatusLine(
+    text: String,
+    color: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier,
+) {
     Row(
-        Modifier.padding(top = 8.dp),
+        modifier.padding(top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -512,6 +734,73 @@ private fun StatusLine(text: String, color: androidx.compose.ui.graphics.Color) 
         Spacer(Modifier.width(7.dp))
         Text(text, color = color, fontSize = 13.sp)
     }
+}
+
+@Composable
+private fun BackupPasswordDialog(
+    title: String,
+    confirmText: String,
+    requireConfirm: Boolean,
+    message: String? = null,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                if (message != null) {
+                    Text(message, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(12.dp))
+                }
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("备份密码") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (requireConfirm) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = confirm,
+                        onValueChange = { confirm = it },
+                        label = { Text("确认备份密码") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                error?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                error = when {
+                    password.length < 8 -> "备份密码至少需要 8 位"
+                    requireConfirm && password != confirm -> "两次输入的备份密码不一致"
+                    else -> {
+                        onConfirm(password)
+                        null
+                    }
+                }
+            }) { Text(confirmText) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable

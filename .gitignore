@@ -10,4 +10,8 @@ captures/
 *.apk
 *.aab
 *.keystore
+*.jks
+*.p12
+*.base64.txt
 !debug.keystore
+release-signing/

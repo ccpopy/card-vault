@@ -73,13 +73,27 @@ git push origin v1.0.0
 | `ANDROID_KEY_ALIAS` | 签名 key alias |
 | `ANDROID_KEY_PASSWORD` | 签名 key 密码 |
 
-Windows 下可以这样把 keystore 转成 Base64：
+项目根目录提供了 `generate-release-keystore.ps1` 用于生成 release keystore 和 Base64 文本。先编辑脚本顶部的密码：
 
 ```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("cardvault-release.jks")) | Set-Content -Encoding ASCII keystore.base64.txt
+$KeystorePassword = '替换成强密码'
+$KeyPassword = '替换成强密码'
+$KeyAlias = 'cardvault'
 ```
 
-不要把 keystore、密码或 `keystore.base64.txt` 提交到仓库。
+然后执行：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+.\generate-release-keystore.ps1
+```
+
+脚本会生成：
+
+- `release-signing/cardvault-release.jks`
+- `release-signing/cardvault-release.base64.txt`
+
+`release-signing/` 已加入 `.gitignore`。不要把 keystore、密码或 Base64 文件提交到仓库。正式发布过后不要重新生成 keystore，否则后续版本会被 Android 视为另一个应用签名。
 
 ## 主要目录
 

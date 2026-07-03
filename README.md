@@ -73,15 +73,23 @@ git push origin v1.0.0
 | `ANDROID_KEY_ALIAS` | 签名 key alias |
 | `ANDROID_KEY_PASSWORD` | 签名 key 密码 |
 
-项目根目录提供了 `generate-release-keystore.ps1` 用于生成 release keystore 和 Base64 文本。先编辑脚本顶部的密码：
+项目根目录提供了 `generate-release-keystore.ps1` 用于生成 release keystore 和 Base64 文本。先复制模板并填写本地 `.env`：
 
 ```powershell
-$KeystorePassword = '替换成强密码'
-$KeyPassword = '替换成强密码'
-$KeyAlias = 'cardvault'
+$ErrorActionPreference = 'Stop'
+Copy-Item -LiteralPath .env.example -Destination .env
 ```
 
-然后执行：
+然后编辑 `.env`：
+
+```text
+ANDROID_KEYSTORE_PASSWORD=替换成强密码
+ANDROID_KEY_PASSWORD=替换成强密码
+ANDROID_KEY_ALIAS=cardvault
+ANDROID_DISTINGUISHED_NAME=CN=CardVault,O=CardVault,C=CN
+```
+
+再执行：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -93,7 +101,7 @@ $ErrorActionPreference = 'Stop'
 - `release-signing/cardvault-release.jks`
 - `release-signing/cardvault-release.base64.txt`
 
-`release-signing/` 已加入 `.gitignore`。不要把 keystore、密码或 Base64 文件提交到仓库。正式发布过后不要重新生成 keystore，否则后续版本会被 Android 视为另一个应用签名。
+`.env` 和 `release-signing/` 已加入 `.gitignore`。不要把 `.env`、keystore、密码或 Base64 文件提交到仓库。正式发布过后不要重新生成 keystore，否则后续版本会被 Android 视为另一个应用签名。
 
 ## 主要目录
 

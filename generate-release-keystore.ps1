@@ -1,26 +1,75 @@
 param(
+    [string]$EnvFile = (Join-Path $PSScriptRoot '.env'),
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
 
-# Edit these values before running this script.
-# Keep the generated keystore and passwords private. They are required for future app updates.
-$KeystorePassword = 'CHANGE_ME_KEYSTORE_PASSWORD'
-$KeyPassword = 'CHANGE_ME_KEY_PASSWORD'
-$KeyAlias = 'cardvault'
-$DistinguishedName = 'CN=CardVault,O=CardVault,C=CN'
+function Read-DotEnv {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Missing env file: $Path. Copy .env.example to .env and fill in your release signing values."
+    }
+
+    $values = @{}
+    $lines = Get-Content -LiteralPath $Path -Encoding UTF8
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#')) {
+            continue
+        }
+
+        if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$') {
+            throw "Invalid .env line: $line"
+        }
+
+        $name = $Matches[1]
+        $value = $Matches[2].Trim()
+        if (
+            ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'"))
+        ) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        $values[$name] = $value
+    }
+
+    return $values
+}
+
+function Get-RequiredValue {
+    param(
+        [hashtable]$Values,
+        [string]$Name
+    )
+
+    if (-not $Values.ContainsKey($Name) -or [string]::IsNullOrWhiteSpace($Values[$Name])) {
+        throw "Missing required value in .env: $Name"
+    }
+
+    $value = [string]$Values[$Name]
+    if ($value.StartsWith('CHANGE_ME')) {
+        throw "Replace placeholder value in .env: $Name"
+    }
+
+    return $value
+}
+
+$envValues = Read-DotEnv -Path $EnvFile
+
+$KeystorePassword = Get-RequiredValue -Values $envValues -Name 'ANDROID_KEYSTORE_PASSWORD'
+$KeyPassword = Get-RequiredValue -Values $envValues -Name 'ANDROID_KEY_PASSWORD'
+$KeyAlias = Get-RequiredValue -Values $envValues -Name 'ANDROID_KEY_ALIAS'
+$DistinguishedName = if ($envValues.ContainsKey('ANDROID_DISTINGUISHED_NAME') -and -not [string]::IsNullOrWhiteSpace($envValues['ANDROID_DISTINGUISHED_NAME'])) {
+    [string]$envValues['ANDROID_DISTINGUISHED_NAME']
+} else {
+    'CN=CardVault,O=CardVault,C=CN'
+}
 
 $OutputDir = Join-Path $PSScriptRoot 'release-signing'
 $KeystorePath = Join-Path $OutputDir 'cardvault-release.jks'
 $Base64Path = Join-Path $OutputDir 'cardvault-release.base64.txt'
-
-if (
-    $KeystorePassword -eq 'CHANGE_ME_KEYSTORE_PASSWORD' -or
-    $KeyPassword -eq 'CHANGE_ME_KEY_PASSWORD'
-) {
-    throw 'Edit generate-release-keystore.ps1 first: replace the placeholder passwords at the top of the file.'
-}
 
 if ((Test-Path -LiteralPath $KeystorePath) -and -not $Force) {
     throw "Keystore already exists: $KeystorePath. Re-run with -Force only if you intentionally want to replace it before any public release."
@@ -42,6 +91,13 @@ if ($null -eq $keytool) {
 }
 
 if ($null -eq $keytool) {
+    $scoopKeytool = Join-Path $env:USERPROFILE 'scoop\apps\temurin17-jdk\current\bin\keytool.exe'
+    if (Test-Path -LiteralPath $scoopKeytool) {
+        $keytool = $scoopKeytool
+    }
+}
+
+if ($null -eq $keytool) {
     throw 'keytool was not found. Install JDK 17 and set JAVA_HOME, or add keytool to PATH.'
 }
 
@@ -55,7 +111,7 @@ if ((Test-Path -LiteralPath $KeystorePath) -and $Force) {
     -genkeypair `
     -v `
     -keystore $KeystorePath `
-    -storetype PKCS12 `
+    -storetype JKS `
     -storepass $KeystorePassword `
     -keypass $KeyPassword `
     -alias $KeyAlias `
@@ -76,6 +132,6 @@ Write-Host "Generated base64:   $Base64Path"
 Write-Host ''
 Write-Host 'Configure these GitHub Actions secrets:'
 Write-Host "ANDROID_KEYSTORE_BASE64 = contents of $Base64Path"
-Write-Host "ANDROID_KEYSTORE_PASSWORD = $KeystorePassword"
+Write-Host 'ANDROID_KEYSTORE_PASSWORD = value from .env'
 Write-Host "ANDROID_KEY_ALIAS = $KeyAlias"
-Write-Host "ANDROID_KEY_PASSWORD = $KeyPassword"
+Write-Host 'ANDROID_KEY_PASSWORD = value from .env'

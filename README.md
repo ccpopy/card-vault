@@ -39,7 +39,7 @@
 ```bat
 build.bat          :: 构建 debug APK -> app\build\outputs\apk\debug\app-debug.apk
 build.bat install  :: 构建并 adb 安装到已连接的手机（需开启 USB 调试）
-build.bat release  :: 构建 release APK（未签名，需自行签名后才能安装）
+build.bat release  :: 构建 release APK（需要配置 release 签名环境变量）
 ```
 
 最低支持 Android 8.0（API 26），目标 API 34。
@@ -55,7 +55,31 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-当前工作流构建的是 debug 签名 APK，适合直接下载安装到测试设备。正式分发时应使用自己的签名密钥构建 release APK。
+当前发布工作流构建的是签名 release APK，并按 ABI 输出多个安装包：
+
+- `CardVault_<version>_arm64-v8a.apk`
+- `CardVault_<version>_armeabi-v7a.apk`
+- `CardVault_<version>_x86.apk`
+- `CardVault_<version>_x86_64.apk`
+- `CardVault_<version>_universal.apk`
+- `SHA256SUMS.txt`
+
+首次发布前需要在 GitHub 仓库的 `Settings` -> `Secrets and variables` -> `Actions` 中配置：
+
+| Secret | 说明 |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | release keystore 文件的 Base64 内容 |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore 密码 |
+| `ANDROID_KEY_ALIAS` | 签名 key alias |
+| `ANDROID_KEY_PASSWORD` | 签名 key 密码 |
+
+Windows 下可以这样把 keystore 转成 Base64：
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("cardvault-release.jks")) | Set-Content -Encoding ASCII keystore.base64.txt
+```
+
+不要把 keystore、密码或 `keystore.base64.txt` 提交到仓库。
 
 ## 主要目录
 

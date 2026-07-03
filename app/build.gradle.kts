@@ -5,6 +5,15 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val releaseSigningEnv = listOf(
+    "ANDROID_KEYSTORE_FILE",
+    "ANDROID_KEYSTORE_PASSWORD",
+    "ANDROID_KEY_ALIAS",
+    "ANDROID_KEY_PASSWORD",
+)
+
+fun envOrNull(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
+
 android {
     namespace = "com.cardvault.app"
     compileSdk = 34
@@ -17,10 +26,32 @@ android {
         versionName = "1.0.0"
     }
 
+    signingConfigs {
+        create("release") {
+            val keystoreFile = envOrNull("ANDROID_KEYSTORE_FILE")
+            val keystorePassword = envOrNull("ANDROID_KEYSTORE_PASSWORD")
+            val alias = envOrNull("ANDROID_KEY_ALIAS")
+            val keyPasswordValue = envOrNull("ANDROID_KEY_PASSWORD")
+
+            if (
+                keystoreFile != null &&
+                keystorePassword != null &&
+                alias != null &&
+                keyPasswordValue != null
+            ) {
+                storeFile = file(keystoreFile)
+                storePassword = keystorePassword
+                keyAlias = alias
+                keyPassword = keyPasswordValue
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -38,8 +69,30 @@ android {
     buildFeatures {
         compose = true
     }
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            isUniversalApk = true
+        }
+    }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+}
+
+gradle.taskGraph.whenReady {
+    val buildsRelease = allTasks.any { task ->
+        task.name.contains("Release", ignoreCase = true)
+    }
+    if (buildsRelease) {
+        val missing = releaseSigningEnv.filter { envOrNull(it) == null }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "Release signing is required. Missing environment variables: ${missing.joinToString()}"
+            )
+        }
     }
 }
 

@@ -4,14 +4,20 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequest
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import java.time.Duration
 import java.time.LocalDateTime
 import java.time.LocalTime
-import java.util.concurrent.TimeUnit
 
+/**
+ * 到期提醒调度：自续期的一次性任务锚定「下一个早上 9 点」，
+ * Worker 执行完毕后自行排下一天，天然免疫周期任务在 Doze 下的逐日漂移。
+ * apply(true) 用 KEEP 策略——已有待执行任务时不重排，
+ * 避免冷启动把当天尚未执行的提醒顶掉（旧实现的 bug）。
+ */
 class ExpiryNotificationScheduler(private val context: Context) {
     fun apply(enabled: Boolean) {
         ensureChannel(context)
@@ -20,20 +26,27 @@ class ExpiryNotificationScheduler(private val context: Context) {
             workManager.cancelUniqueWork(WORK_NAME)
             return
         }
-        val request = PeriodicWorkRequestBuilder<ExpiryNotificationWorker>(24, TimeUnit.HOURS)
-            .setInitialDelay(delayUntilNextMorning().toMillis(), TimeUnit.MILLISECONDS)
-            .addTag(WORK_NAME)
-            .build()
-        workManager.enqueueUniquePeriodicWork(
-            WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
-            request,
-        )
+        workManager.enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, nextRequest())
     }
 
     companion object {
         const val WORK_NAME = "card_expiry_notifications"
         const val CHANNEL_ID = "card_expiry"
+
+        /** Worker 执行完后调用：排定次日 9 点的下一次检查 */
+        fun scheduleNext(context: Context) {
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                WORK_NAME,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                nextRequest(),
+            )
+        }
+
+        private fun nextRequest(): OneTimeWorkRequest =
+            OneTimeWorkRequestBuilder<ExpiryNotificationWorker>()
+                .setInitialDelay(delayUntilNextMorning())
+                .addTag(WORK_NAME)
+                .build()
 
         fun ensureChannel(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

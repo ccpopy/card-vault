@@ -2,6 +2,7 @@ package com.cardvault.app.ui.lock
 
 import android.content.Context
 import android.content.ContextWrapper
+import androidx.activity.compose.BackHandler
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
@@ -43,7 +44,9 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.cardvault.app.AppContainer
 import com.cardvault.app.security.PinManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 private const val PIN_LENGTH = 6
 
@@ -97,9 +100,13 @@ fun LockScreen(container: AppContainer) {
     val pinManager = container.pinManager
     val context = LocalContext.current
     val pinSet = remember { pinManager.isPinSet() }
-    val bioUsable = remember { pinManager.isBiometricEnabled() && canUseBiometric(context) }
+    val bioEnabled = remember { pinManager.isBiometricEnabled() }
+    val bioUsable = remember { bioEnabled && canUseBiometric(context) }
     val pinRecheck = remember { pinManager.needsPinRecheck() }
     var showPinReset by remember { mutableStateOf(false) }
+
+    // 覆盖式锁屏时 NavHost 仍在下层，返回键必须由锁屏层消费，避免锁定期间改变导航栈。
+    BackHandler {}
 
     fun tryBiometric() {
         verifyBiometric(
@@ -108,11 +115,6 @@ fun LockScreen(container: AppContainer) {
             "使用指纹 / 面容解锁",
             if (pinSet) "使用 PIN" else "取消",
         ) { container.lockController.unlock() }
-    }
-
-    // 只开了生物识别但设备生物识别已不可用（如指纹被删除）：没有其他凭据可验，直接放行
-    LaunchedEffect(Unit) {
-        if (!pinSet && !bioUsable) container.lockController.unlock()
     }
 
     when {
@@ -138,6 +140,8 @@ fun LockScreen(container: AppContainer) {
         )
 
         bioUsable -> BiometricOnlyScreen(onBiometric = ::tryBiometric)
+
+        else -> BiometricUnavailableScreen()
     }
 }
 
@@ -163,7 +167,7 @@ private fun PinUnlockScreen(
             if (lockoutMs > 0) {
                 error = "尝试次数过多，请 ${lockoutMs / 1000 + 1} 秒后再试"
                 input = ""
-            } else if (container.pinManager.verifyPin(input)) {
+            } else if (withContext(Dispatchers.Default) { container.pinManager.verifyPin(input) }) {
                 container.lockController.unlock()
             } else {
                 error = "PIN 不正确"
@@ -191,6 +195,37 @@ private fun PinUnlockScreen(
             }
         },
     )
+}
+
+/** 仅开启生物识别但系统当前不可用时，明确阻断而不是静默放行 */
+@Composable
+private fun BiometricUnavailableScreen() {
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Icon(
+                Icons.Filled.Fingerprint,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(46.dp),
+            )
+            Spacer(Modifier.height(20.dp))
+            Text("生物识别不可用", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "此应用只开启了生物识别解锁，但系统当前无法验证指纹 / 面容。请先在系统设置中恢复生物识别后再打开应用。",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 19.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
 }
 
 /** 仅开启生物识别时的解锁页 */
@@ -257,6 +292,9 @@ fun PinSetupScreen(
     var first by remember { mutableStateOf("") }
     var input by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+
+    // 返回键退出设置流程本身，而不是把宿主页面（设置页）整个 pop 掉
+    onCancel?.let { cancel -> BackHandler(onBack = cancel) }
 
     LaunchedEffect(input) {
         if (input.length == PIN_LENGTH) {

@@ -14,14 +14,15 @@ import com.cardvault.app.network.AppUpdateInfo
 import com.cardvault.app.network.UpdateCheckResult
 import com.cardvault.app.network.UpdateService
 import com.cardvault.app.notifications.ExpiryNotificationScheduler
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import java.io.File
 
 sealed interface ProxyTestState {
     data object Idle : ProxyTestState
     data object Testing : ProxyTestState
-    data class Ok(val latencyMs: Long) : ProxyTestState
+    data class Ok(val message: String) : ProxyTestState
     data class Failed(val message: String) : ProxyTestState
 }
 
@@ -62,11 +63,16 @@ class SettingsViewModel(
     var updateState by mutableStateOf<AppUpdateState>(AppUpdateState.Idle)
         private set
 
+    private var downloadJob: Job? = null
+
     fun setAutoLockSeconds(v: Int) = viewModelScope.launch { settingsRepo.setAutoLockSeconds(v) }
     fun setMaskNumbers(v: Boolean) = viewModelScope.launch { settingsRepo.setMaskNumbers(v) }
     fun setClipboardClearSeconds(v: Int) = viewModelScope.launch { settingsRepo.setClipboardClearSeconds(v) }
     fun setSecureScreen(v: Boolean) = viewModelScope.launch { settingsRepo.setSecureScreen(v) }
     fun setThemeMode(v: String) = viewModelScope.launch { settingsRepo.setThemeMode(v) }
+    fun setOfflineMode(v: Boolean) = viewModelScope.launch { settingsRepo.setOfflineMode(v) }
+    fun setLockOnScreenOff(v: Boolean) = viewModelScope.launch { settingsRepo.setLockOnScreenOff(v) }
+    fun setExpiryNoticeDays(v: Int) = viewModelScope.launch { settingsRepo.setExpiryNoticeDays(v) }
     fun setExpiryNotifications(v: Boolean) = viewModelScope.launch {
         settingsRepo.setExpiryNotifications(v)
         notificationScheduler.apply(v)
@@ -79,6 +85,10 @@ class SettingsViewModel(
 
     fun testProxy(url: String) {
         viewModelScope.launch {
+            if (settingsRepo.settings.first().offlineMode) {
+                proxyTest = ProxyTestState.Failed("完全离线模式已开启")
+                return@launch
+            }
             proxyTest = ProxyTestState.Testing
             binService.testConnection(url.ifBlank { null })
                 .onSuccess { proxyTest = ProxyTestState.Ok(it) }
@@ -88,9 +98,13 @@ class SettingsViewModel(
 
     fun checkUpdate() {
         viewModelScope.launch {
+            val settings = settingsRepo.settings.first()
+            if (settings.offlineMode) {
+                updateState = AppUpdateState.Error("完全离线模式已开启，检查更新被禁用")
+                return@launch
+            }
             updateState = AppUpdateState.Checking
-            val proxyUrl = settingsRepo.settings.first().proxyUrl.ifBlank { null }
-            updateService.check(proxyUrl)
+            updateService.check(settings.proxyUrl.ifBlank { null })
                 .onSuccess { result ->
                     updateState = when (result) {
                         is UpdateCheckResult.Available -> AppUpdateState.Available(result.info)
@@ -107,33 +121,53 @@ class SettingsViewModel(
 
     fun downloadUpdate(info: AppUpdateInfo) {
         if (updateState is AppUpdateState.Downloading) return
-        viewModelScope.launch {
+        downloadJob = viewModelScope.launch {
             updateState = AppUpdateState.Downloading(info, 0L, info.assetSizeBytes)
-            val target = File(appContext.cacheDir, "updates/CardVault-${info.latestVersion}.apk")
+            val target = UpdateService.updateApkFile(appContext, info.latestVersion)
             val proxyUrl = settingsRepo.settings.first().proxyUrl.ifBlank { null }
-            updateService.downloadApk(info.downloadUrl, target, proxyUrl) { downloaded, total ->
-                val current = updateState
-                if (current is AppUpdateState.Downloading) {
-                    updateState = current.copy(
-                        downloadedBytes = downloaded,
-                        totalBytes = if (total > 0) total else current.totalBytes,
-                    )
+            try {
+                updateService.downloadApk(info, target, proxyUrl) { downloaded, total ->
+                    val current = updateState
+                    if (current is AppUpdateState.Downloading) {
+                        updateState = current.copy(
+                            downloadedBytes = downloaded,
+                            totalBytes = if (total > 0) total else current.totalBytes,
+                        )
+                    }
                 }
+                    .onSuccess { file ->
+                        if (updateState is AppUpdateState.Downloading) {
+                            updateState = AppUpdateState.ReadyToInstall(info, file.absolutePath)
+                        }
+                    }
+                    .onFailure {
+                        if (updateState is AppUpdateState.Downloading) {
+                            updateState = AppUpdateState.Error(it.message ?: "下载失败")
+                        }
+                    }
+            } catch (e: CancellationException) {
+                // 用户主动取消：已下载的 .part 保留，下次下载从断点续传
+                throw e
             }
-                .onSuccess { file ->
-                    if (updateState is AppUpdateState.Downloading) {
-                        updateState = AppUpdateState.ReadyToInstall(info, file.absolutePath)
-                    }
-                }
-                .onFailure {
-                    if (updateState is AppUpdateState.Downloading) {
-                        updateState = AppUpdateState.Error(it.message ?: "下载失败")
-                    }
-                }
         }
     }
 
+    /** 取消下载：中止网络读取，回到「可下载」状态；断点文件保留用于续传 */
+    fun cancelDownload() {
+        val current = updateState
+        downloadJob?.cancel()
+        downloadJob = null
+        if (current is AppUpdateState.Downloading) {
+            updateState = AppUpdateState.Available(current.info)
+        }
+    }
+
+    fun reportUpdateError(message: String) {
+        updateState = AppUpdateState.Error(message)
+    }
+
     fun dismissUpdate() {
+        if (updateState is AppUpdateState.Downloading) cancelDownload()
         updateState = AppUpdateState.Idle
     }
 

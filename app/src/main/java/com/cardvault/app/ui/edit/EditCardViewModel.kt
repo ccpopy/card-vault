@@ -6,7 +6,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.cardvault.app.data.CardEntity
+import com.cardvault.app.data.CardKind
 import com.cardvault.app.data.CardRepository
+import com.cardvault.app.data.DuplicateCardNumberException
 import com.cardvault.app.data.SettingsRepository
 import com.cardvault.app.domain.BankDirectory
 import com.cardvault.app.domain.CardBrand
@@ -45,6 +47,9 @@ class EditCardViewModel(
         private set
     var alias by mutableStateOf("")
     var styleId by mutableStateOf<String?>(null)
+    /** 卡类型（借记/信用/预付）；在线 BIN 查询命中时自动回填，也可手动指定 */
+    var cardType by mutableStateOf<String?>(null)
+    private var archived = false
     private var orderPosition by mutableStateOf(0L)
 
     /** 手动指定卡组织；null = 按卡号自动识别 */
@@ -71,6 +76,8 @@ class EditCardViewModel(
                 bankCode = c.bankCode
                 alias = c.alias
                 styleId = c.styleId
+                cardType = c.cardType
+                archived = c.archived
                 orderPosition = c.orderPosition
                 val detected = CardBrand.detect(c.number)
                 brandOverride = CardBrand.fromName(c.brand).takeIf { it != detected }
@@ -91,7 +98,7 @@ class EditCardViewModel(
     }
 
     fun onNumberChange(value: String) {
-        number = value.filter { it.isDigit() }.take(19)
+        number = value.filter { it in '0'..'9' }.take(19)
         if (!bankEdited) {
             val bank = BankDirectory.findBank(number)
             bankName = bank?.name.orEmpty()
@@ -109,18 +116,19 @@ class EditCardViewModel(
     fun verifyOnline() {
         viewModelScope.launch {
             lookupState = LookupState.Loading
-            val proxy = settingsRepo.settings.first().proxyUrl.ifBlank { null }
-            binService.lookup(number, proxy)
+            val settings = settingsRepo.settings.first()
+            binService.lookup(number, settings.proxyUrl.ifBlank { null }, settings.offlineMode)
                 .onSuccess { info ->
                     if (info.brand != CardBrand.UNKNOWN) brandOverride =
                         info.brand.takeIf { it != detectedBrand }
                     if (!info.bankName.isNullOrBlank() && !bankEdited) {
                         bankName = info.bankName
                     }
+                    CardKind.fromKey(info.cardType)?.let { cardType = it.key }
                     val parts = listOfNotNull(
                         info.bankName,
                         info.brand.takeIf { it != CardBrand.UNKNOWN }?.displayName,
-                        info.cardType?.let { if (it == "debit") "借记卡" else "信用卡" },
+                        CardKind.fromKey(info.cardType)?.label,
                         info.country,
                     )
                     lookupState = LookupState.Done(
@@ -162,6 +170,8 @@ class EditCardViewModel(
         brand = brand.name,
         bankName = bankName.trim(),
         bankCode = bankCode,
+        cardType = cardType,
+        archived = archived,
         alias = alias.trim(),
         styleId = styleId,
         orderPosition = orderPosition,
@@ -169,18 +179,34 @@ class EditCardViewModel(
         updatedAt = 0,
     )
 
+    var saving by mutableStateOf(false)
+        private set
+    var saveError by mutableStateOf<String?>(null)
+        private set
+
+    /** 防重入：保存进行中忽略再次点击，避免快速双击插入两张重复卡 */
     fun save(onDone: () -> Unit) {
-        if (validate() != null) return
+        if (saving || validate() != null) return
+        saving = true
+        saveError = null
         viewModelScope.launch {
-            val now = System.currentTimeMillis()
-            val existing = if (cardId > 0) repo.getById(cardId) else null
-            repo.upsert(
-                buildPreviewCard().copy(
-                    createdAt = existing?.createdAt ?: now,
-                    updatedAt = now,
+            try {
+                val now = System.currentTimeMillis()
+                val existing = if (cardId > 0) repo.getById(cardId) else null
+                repo.upsert(
+                    buildPreviewCard().copy(
+                        createdAt = existing?.createdAt ?: now,
+                        updatedAt = now,
+                    )
                 )
-            )
-            onDone()
+                onDone()
+            } catch (e: DuplicateCardNumberException) {
+                saveError = e.message
+            } catch (e: Exception) {
+                saveError = e.message ?: "保存失败"
+            } finally {
+                saving = false
+            }
         }
     }
 

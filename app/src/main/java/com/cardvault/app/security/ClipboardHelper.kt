@@ -1,6 +1,7 @@
 package com.cardvault.app.security
 
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
@@ -22,8 +23,7 @@ class ClipboardHelper(private val appScope: CoroutineScope) {
         val clip = ClipData.newPlainText(label, text)
         if (Build.VERSION.SDK_INT >= 24) {
             clip.description.extras = PersistableBundle().apply {
-                // API 33+ 的官方常量，低版本上同名 key 也被主流 ROM 识别
-                putBoolean("android.content.extra.IS_SENSITIVE", true)
+                putBoolean(sensitiveExtraKey(), true)
             }
         }
         cm.setPrimaryClip(clip)
@@ -37,13 +37,20 @@ class ClipboardHelper(private val appScope: CoroutineScope) {
             clearJob = appScope.launch(Dispatchers.Main) {
                 delay(clearAfterSeconds * 1000L)
                 val manager = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                // 仅当剪贴板内容仍是我们写入的才清空，避免误删用户后来复制的内容
+                // Android 10+ 后台应用读不到剪贴板（primaryClip 为 null）。
+                // 复制卡号后切到其他应用粘贴恰恰是最常见场景——读不到时必须照样清空，
+                // 否则“定时清除”承诺在最需要它的时候失效。只有确认剪贴板已被
+                // 其他内容覆盖（前台可读且不相等）时才跳过，避免误删用户后来复制的内容。
                 val current = manager.primaryClip?.getItemAt(0)?.text?.toString()
-                if (current == text) {
+                if (current == null || current == text) {
                     if (Build.VERSION.SDK_INT >= 28) manager.clearPrimaryClip()
                     else manager.setPrimaryClip(ClipData.newPlainText("", ""))
                 }
             }
         }
     }
+
+    private fun sensitiveExtraKey(): String =
+        if (Build.VERSION.SDK_INT >= 33) ClipDescription.EXTRA_IS_SENSITIVE
+        else "android.content.extra.IS_SENSITIVE" // 官方常量的字面值，低版本主流 ROM 也识别
 }

@@ -58,6 +58,7 @@ fun UpdateAvailableDialog(
     state: AppUpdateState,
     currentVersion: String,
     onDownload: (AppUpdateInfo) -> Unit,
+    onCancelDownload: () -> Unit,
     onInstall: (String) -> Unit,
     onOpenInBrowser: (AppUpdateInfo) -> Unit,
     onDismiss: () -> Unit,
@@ -71,7 +72,7 @@ fun UpdateAvailableDialog(
     val downloading = state as? AppUpdateState.Downloading
 
     Dialog(
-        onDismissRequest = { if (downloading == null) onDismiss() },
+        onDismissRequest = { if (downloading == null) onDismiss() else onCancelDownload() },
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         val visible = remember { MutableTransitionState(false).apply { targetState = true } }
@@ -121,11 +122,12 @@ fun UpdateAvailableDialog(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             TextButton(
-                                onClick = onDismiss,
-                                enabled = downloading == null,
+                                onClick = {
+                                    if (downloading == null) onDismiss() else onCancelDownload()
+                                },
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Text(if (downloading != null) "下载中" else "稍后")
+                                Text(if (downloading != null) "取消下载" else "稍后")
                             }
                             Button(
                                 onClick = {

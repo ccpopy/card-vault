@@ -26,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.FileDownload
@@ -34,10 +35,12 @@ import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.GppGood
 import androidx.compose.material.icons.filled.GppMaybe
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockClock
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Password
 import androidx.compose.material.icons.filled.Screenshot
+import androidx.compose.material.icons.filled.ScreenLockPortrait
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
@@ -80,7 +83,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.cardvault.app.BuildConfig
 import com.cardvault.app.data.AppSettings
+import com.cardvault.app.data.SettingsRepository
 import com.cardvault.app.network.BinLookupService
+import com.cardvault.app.security.LockController
 import com.cardvault.app.security.PinManager
 import com.cardvault.app.update.ApkInstaller
 import com.cardvault.app.ui.lock.PinSetupScreen
@@ -94,6 +99,7 @@ fun SettingsScreen(
     vm: SettingsViewModel,
     settings: AppSettings,
     pinManager: PinManager,
+    lockController: LockController,
     onBack: () -> Unit,
 ) {
     var proxyInput by rememberSaveable(settings.proxyUrl) { mutableStateOf(settings.proxyUrl) }
@@ -158,13 +164,13 @@ fun SettingsScreen(
     ) {
         val s = vm.updateState
         if (s is AppUpdateState.ReadyToInstall && ApkInstaller.canInstallPackages(context)) {
-            ApkInstaller.install(context, File(s.apkPath))
+            ApkInstaller.install(context, File(s.apkPath))?.let(vm::reportUpdateError)
         }
     }
 
     fun launchInstall(path: String) {
         if (ApkInstaller.canInstallPackages(context)) {
-            ApkInstaller.install(context, File(path))
+            ApkInstaller.install(context, File(path))?.let(vm::reportUpdateError)
         } else {
             installLauncher.launch(ApkInstaller.unknownSourcesSettingsIntent(context))
         }
@@ -246,6 +252,34 @@ fun SettingsScreen(
                     enabled = pinSet || bioOn,
                     onSelect = vm::setAutoLockSeconds,
                 )
+                RowDivider()
+                SettingRow(
+                    icon = Icons.Filled.ScreenLockPortrait,
+                    title = "息屏即锁",
+                    subtitle = "屏幕熄灭时立即锁定应用",
+                    enabled = pinSet || bioOn,
+                ) {
+                    Switch(
+                        checked = settings.lockOnScreenOff && (pinSet || bioOn),
+                        enabled = pinSet || bioOn,
+                        onCheckedChange = vm::setLockOnScreenOff,
+                    )
+                }
+                if (pinSet || bioOn) {
+                    RowDivider()
+                    SettingRow(
+                        icon = Icons.Filled.LockClock,
+                        title = "立即锁定",
+                        subtitle = null,
+                        onClick = { lockController.lockNow() },
+                    ) {
+                        Icon(
+                            Icons.Filled.ChevronRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 if (pinSet) {
                     RowDivider()
                     SettingRow(
@@ -312,6 +346,15 @@ fun SettingsScreen(
                         onCheckedChange = ::setExpiryNotificationPreference,
                     )
                 }
+                RowDivider()
+                DropdownSettingRow(
+                    icon = Icons.Filled.Timer,
+                    title = "提前提醒天数",
+                    subtitle = "到期前多少天视为「即将到期」",
+                    options = SettingsRepository.EXPIRY_NOTICE_OPTIONS.map { it to "$it 天" },
+                    current = settings.expiryNoticeDays,
+                    onSelect = vm::setExpiryNoticeDays,
+                )
                 if (notificationPermissionDenied) {
                     Text(
                         "系统通知权限未授权，无法开启到期提醒。",
@@ -325,6 +368,14 @@ fun SettingsScreen(
 
             SectionLabel("网络")
             SectionCard {
+                SettingRow(
+                    icon = Icons.Filled.CloudOff,
+                    title = "完全离线",
+                    subtitle = "禁用 BIN 在线查询、连通性测试与检查更新",
+                ) {
+                    Switch(checked = settings.offlineMode, onCheckedChange = vm::setOfflineMode)
+                }
+                RowDivider()
                 Column(Modifier.padding(16.dp)) {
                     OutlinedTextField(
                         value = proxyInput,
@@ -362,7 +413,7 @@ fun SettingsScreen(
                     }
                     when (val t = vm.proxyTest) {
                         is ProxyTestState.Ok -> StatusLine(
-                            "连接正常 · ${t.latencyMs} ms",
+                            t.message,
                             MaterialTheme.colorScheme.primary,
                         )
                         is ProxyTestState.Failed -> StatusLine(
@@ -579,6 +630,7 @@ fun SettingsScreen(
             state = updateState,
             currentVersion = BuildConfig.VERSION_NAME,
             onDownload = { info -> vm.downloadUpdate(info) },
+            onCancelDownload = { vm.cancelDownload() },
             onInstall = { path -> launchInstall(path) },
             onOpenInBrowser = { info -> uriHandler.openUri(info.releasePageUrl) },
             onDismiss = { vm.dismissUpdate() },
@@ -930,7 +982,7 @@ private fun ChangePinDialog(pinManager: PinManager, onDismiss: () -> Unit) {
 private fun PinField(value: String, onChange: (String) -> Unit, label: String) {
     OutlinedTextField(
         value = value,
-        onValueChange = { onChange(it.filter { c -> c.isDigit() }.take(6)) },
+        onValueChange = { onChange(it.filter { c -> c in '0'..'9' }.take(6)) },
         label = { Text(label) },
         singleLine = true,
         visualTransformation = PasswordVisualTransformation(),

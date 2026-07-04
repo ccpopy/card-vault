@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cardvault.app.data.CardEntity
+import com.cardvault.app.data.CardKind
 import com.cardvault.app.domain.CardBrand
 import com.cardvault.app.domain.CardStylePreset
 import com.cardvault.app.domain.CardValidation
@@ -301,6 +302,23 @@ fun BankCardFront(
                 ChipGraphic()
                 Spacer(Modifier.width(10.dp))
                 ContactlessIcon(tint.copy(alpha = 0.85f))
+                CardKind.fromKey(card.cardType)?.let { kind ->
+                    Spacer(Modifier.weight(1f))
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(tint.copy(alpha = 0.14f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            kind.label,
+                            color = tint.copy(alpha = 0.9f),
+                            fontSize = 9.sp,
+                            letterSpacing = 1.sp,
+                            maxLines = 1,
+                        )
+                    }
+                }
             }
             Spacer(Modifier.height(10.dp))
             Text(
@@ -311,6 +329,9 @@ fun BankCardFront(
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Medium,
                 letterSpacing = 2.sp,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(14.dp))
             Row(
@@ -318,7 +339,7 @@ fun BankCardFront(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Bottom,
             ) {
-                Column {
+                Column(Modifier.weight(1f, fill = false)) {
                     Text("持卡人", color = tint.copy(alpha = 0.65f), fontSize = 9.sp, letterSpacing = 1.sp)
                     Text(
                         card.cardholder.uppercase().ifBlank { "CARDHOLDER" },
@@ -326,6 +347,8 @@ fun BankCardFront(
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         letterSpacing = 1.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
@@ -489,6 +512,22 @@ fun BrandMark(brand: CardBrand, tint: Color) {
         CardBrand.JCB -> Text("JCB", color = tint, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
         CardBrand.DISCOVER -> Text("DISCOVER", color = tint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         CardBrand.DINERS -> Text("Diners Club", color = tint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        CardBrand.MAESTRO -> Row {
+            Box(
+                Modifier
+                    .size(22.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color(0xFF0099DF).copy(alpha = 0.92f))
+            )
+            Box(
+                Modifier
+                    .offset(x = (-9).dp)
+                    .size(22.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color(0xFFED0006).copy(alpha = 0.85f))
+            )
+        }
+        CardBrand.MIR -> Text("MIR", color = tint, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold, fontStyle = FontStyle.Italic)
         CardBrand.UNKNOWN -> {}
     }
 }

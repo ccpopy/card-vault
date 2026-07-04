@@ -9,49 +9,62 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.room.Room
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.cardvault.app.CardVaultApp
 import com.cardvault.app.MainActivity
 import com.cardvault.app.R
-import com.cardvault.app.data.CardDatabase
 import com.cardvault.app.domain.CardValidation
-import com.cardvault.app.security.DbKeyManager
-import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
+import kotlinx.coroutines.flow.first
 
+/**
+ * 每日到期检查。复用应用级单例数据库与设置仓库（不再自建第二个 Room 实例，
+ * 也不再手工维护迁移列表）；瞬时异常走 Result.retry，最终无论成败都续排次日任务。
+ */
 class ExpiryNotificationWorker(
     context: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        if (!canPostNotifications()) return Result.success()
+        val container = (applicationContext as CardVaultApp).container
+        return try {
+            val settings = container.settingsRepository.settings.first()
+            // 开关已被关闭：不提醒也不续排（apply(false) 已取消，但保险起见再判一次）
+            if (!settings.expiryNotifications) return Result.success()
+
+            checkAndNotify(container, settings.expiryNoticeDays)
+            ExpiryNotificationScheduler.scheduleNext(applicationContext)
+            Result.success()
+        } catch (e: Exception) {
+            if (runAttemptCount < 3) {
+                Result.retry()
+            } else {
+                // 放弃本次，但保证链条不断——明天还会再查
+                ExpiryNotificationScheduler.scheduleNext(applicationContext)
+                Result.failure()
+            }
+        }
+    }
+
+    private suspend fun checkAndNotify(container: com.cardvault.app.AppContainer, noticeDays: Int) {
+        if (!canPostNotifications()) return
         ExpiryNotificationScheduler.ensureChannel(applicationContext)
 
-        System.loadLibrary("sqlcipher")
-        val passphrase = DbKeyManager.getOrCreatePassphrase(applicationContext)
-        val db = Room.databaseBuilder(applicationContext, CardDatabase::class.java, "cardvault.db")
-            .openHelperFactory(SupportOpenHelperFactory(passphrase))
-            .addMigrations(CardDatabase.MIGRATION_1_2)
-            .build()
-
-        val cards = try {
-            db.cardDao().getAll()
-        } finally {
-            db.close()
-        }
-
+        val cards = container.cardRepository.getAll().filterNot { it.archived }
         val expiring = cards.count {
-            CardValidation.expiryStatus(it.expiryMonth, it.expiryYear) == CardValidation.ExpiryStatus.EXPIRING
+            CardValidation.expiryStatus(it.expiryMonth, it.expiryYear, noticeDays) ==
+                CardValidation.ExpiryStatus.EXPIRING
         }
         val expired = cards.count {
-            CardValidation.expiryStatus(it.expiryMonth, it.expiryYear) == CardValidation.ExpiryStatus.EXPIRED
+            CardValidation.expiryStatus(it.expiryMonth, it.expiryYear, noticeDays) ==
+                CardValidation.ExpiryStatus.EXPIRED
         }
-        if (expiring == 0 && expired == 0) return Result.success()
+        if (expiring == 0 && expired == 0) return
 
         val text = when {
-            expiring > 0 && expired > 0 -> "$expiring 张卡 30 天内到期，$expired 张卡已过期"
-            expiring > 0 -> "$expiring 张卡将在 30 天内到期"
+            expiring > 0 && expired > 0 -> "$expiring 张卡 $noticeDays 天内到期，$expired 张卡已过期"
+            expiring > 0 -> "$expiring 张卡将在 $noticeDays 天内到期"
             else -> "$expired 张卡已过期"
         }
         val intent = Intent(applicationContext, MainActivity::class.java)
@@ -75,7 +88,6 @@ class ExpiryNotificationWorker(
             .build()
 
         NotificationManagerCompat.from(applicationContext).notify(NOTIFICATION_ID, notification)
-        return Result.success()
     }
 
     private fun canPostNotifications(): Boolean =

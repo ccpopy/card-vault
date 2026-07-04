@@ -68,13 +68,17 @@ object CardStyles {
     fun resolve(styleId: String?, bankCode: String?, brand: CardBrand): CardStylePreset {
         byId(styleId)?.let { return it }
         bankDefaults[bankCode]?.let { id -> byId(id)?.let { return it } }
-        return when (brand) {
-            CardBrand.UNIONPAY -> byId("cmb")!!
-            CardBrand.VISA -> byId("ocean")!!
-            CardBrand.MASTERCARD -> byId("sunset")!!
-            CardBrand.AMEX -> byId("forest")!!
-            CardBrand.JCB -> byId("violet")!!
-            else -> byId("midnight")!!
+        val brandDefault = when (brand) {
+            CardBrand.UNIONPAY -> "cmb"
+            CardBrand.VISA -> "ocean"
+            CardBrand.MASTERCARD -> "sunset"
+            CardBrand.AMEX -> "forest"
+            CardBrand.JCB -> "violet"
+            CardBrand.MAESTRO -> "ocean"
+            CardBrand.MIR -> "forest"
+            else -> "midnight"
         }
+        // 预设 id 与此映射是字符串耦合，byId 找不到时兜底第一项，避免改名后运行时崩溃
+        return byId(brandDefault) ?: presets.first()
     }
 }

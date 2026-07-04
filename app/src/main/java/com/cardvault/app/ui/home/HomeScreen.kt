@@ -1,5 +1,6 @@
 package com.cardvault.app.ui.home
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.animate
@@ -38,16 +39,22 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
@@ -58,6 +65,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -70,6 +81,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -94,6 +106,7 @@ import androidx.compose.ui.zIndex
 import com.cardvault.app.AppContainer
 import com.cardvault.app.data.AppSettings
 import com.cardvault.app.data.CardEntity
+import com.cardvault.app.data.CardSortMode
 import com.cardvault.app.domain.CardBrand
 import com.cardvault.app.domain.CardStyles
 import com.cardvault.app.domain.CardValidation
@@ -110,14 +123,20 @@ fun HomeScreen(
     onEdit: (Long) -> Unit,
     onSettings: () -> Unit,
 ) {
-    val cards by vm.cards.collectAsState()
-    val query by vm.query.collectAsState()
+    val uiState by vm.uiState.collectAsState()
     val filter by vm.filter.collectAsState()
-    val expiringCount by vm.expiringCount.collectAsState()
+    val cards = uiState.cards
+
+    // 搜索词本地持有、同步写回 ViewModel：文本若经 StateFlow 异步回环再驱动输入框，
+    // 中文输入法的组合窗口会丢字/跳光标
+    var searchText by rememberSaveable { mutableStateOf(vm.query.value) }
 
     var detailCard by remember { mutableStateOf<CardEntity?>(null) }
     var showDetail by remember { mutableStateOf(false) }
-    val canReorder = filter == CardFilter.ALL && query.isBlank()
+    val canReorder = filter == CardFilter.ALL && searchText.isBlank() &&
+        uiState.sortMode == CardSortMode.MANUAL
+
+    val snackbarHostState = remember { SnackbarHostState() }
 
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
@@ -234,6 +253,7 @@ fun HomeScreen(
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(onClick = onAdd) {
                 Icon(Icons.Filled.Add, contentDescription = "添加卡片")
@@ -245,7 +265,7 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // 顶栏：搜索 + 设置
+            // 顶栏：搜索 + 排序 + 设置
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -253,14 +273,18 @@ fun HomeScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 OutlinedTextField(
-                    value = query,
-                    onValueChange = { vm.query.value = it },
+                    value = searchText,
+                    onValueChange = {
+                        searchText = it
+                        vm.query.value = it
+                    },
                     modifier = Modifier.weight(1f),
                     placeholder = { Text("搜索持卡人 / 银行 / 卡号…") },
                     leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                     singleLine = true,
                     shape = RoundedCornerShape(14.dp),
                 )
+                SortMenuButton(current = uiState.sortMode, onSelect = vm::setSortMode)
                 IconButton(onClick = onSettings) {
                     Icon(Icons.Filled.Settings, contentDescription = "设置")
                 }
@@ -277,20 +301,27 @@ fun HomeScreen(
                         onClick = { vm.filter.value = f },
                         label = {
                             Text(
-                                if (f == CardFilter.EXPIRING && expiringCount > 0)
-                                    "${f.label} $expiringCount" else f.label
+                                when {
+                                    f == CardFilter.EXPIRING && uiState.expiringCount > 0 ->
+                                        "${f.label} ${uiState.expiringCount}"
+                                    f == CardFilter.ARCHIVED && uiState.archivedCount > 0 ->
+                                        "${f.label} ${uiState.archivedCount}"
+                                    else -> f.label
+                                }
                             )
                         },
                     )
                 }
             }
 
-            if (displayCards.isEmpty()) {
-                EmptyHint(filter, query)
+            if (uiState.loading) {
+                // 数据库首个快照未到：留白，避免冷启动闪现「还没有卡片」空态
+            } else if (displayCards.isEmpty()) {
+                EmptyHint(filter, searchText, uiState.noticeDays, onAdd)
             } else {
                 // 搜索词/筛选变化后列表数据集变了，旧的滚动锚点会把内容顶出屏幕，
                 // 统一回到顶部（修复：删除搜索词后卡片被顶上去，收起键盘才恢复）
-                LaunchedEffect(query, filter) { listState.scrollToItem(0) }
+                LaunchedEffect(searchText, filter) { listState.scrollToItem(0) }
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
@@ -435,9 +466,27 @@ fun HomeScreen(
                     showDetail = false
                     onEdit(card.id)
                 },
+                onArchive = {
+                    val target = !card.archived
+                    vm.setArchived(card, target)
+                    showDetail = false
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            if (target) "已归档，可在「已归档」分类中找到" else "已取消归档"
+                        )
+                    }
+                },
                 onDelete = {
                     vm.delete(card)
                     showDetail = false
+                    scope.launch {
+                        val result = snackbarHostState.showSnackbar(
+                            message = "已删除「${card.bankName.ifBlank { "银行卡" }} •••• ${card.number.takeLast(4)}」",
+                            actionLabel = "撤销",
+                            duration = SnackbarDuration.Long,
+                        )
+                        if (result == SnackbarResult.ActionPerformed) vm.restore(card)
+                    }
                 },
             )
         }
@@ -481,7 +530,35 @@ private fun androidx.compose.foundation.layout.BoxScope.ExpiryBadge(card: CardEn
 }
 
 @Composable
-private fun EmptyHint(filter: CardFilter, query: String) {
+private fun SortMenuButton(current: CardSortMode, onSelect: (CardSortMode) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "排序方式")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            CardSortMode.entries.forEach { mode ->
+                DropdownMenuItem(
+                    text = { Text(mode.label) },
+                    leadingIcon = {
+                        if (mode == current) {
+                            Icon(Icons.Filled.Check, contentDescription = null, Modifier.size(18.dp))
+                        } else {
+                            Spacer(Modifier.size(18.dp))
+                        }
+                    },
+                    onClick = {
+                        onSelect(mode)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyHint(filter: CardFilter, query: String, noticeDays: Int, onAdd: () -> Unit) {
     Column(
         Modifier
             .fillMaxSize()
@@ -499,12 +576,28 @@ private fun EmptyHint(filter: CardFilter, query: String) {
         Text(
             when {
                 query.isNotBlank() -> "没有匹配「$query」的卡片"
-                filter == CardFilter.EXPIRING -> "没有 30 天内到期的卡片"
+                filter == CardFilter.EXPIRING -> "没有 $noticeDays 天内到期的卡片"
                 filter == CardFilter.EXPIRED -> "没有已过期的卡片"
-                else -> "还没有卡片，点右下角 + 添加"
+                filter == CardFilter.ARCHIVED -> "没有已归档的卡片"
+                else -> "还没有卡片"
             },
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (query.isBlank() && filter == CardFilter.ALL) {
+            Spacer(Modifier.height(20.dp))
+            Button(onClick = onAdd) {
+                Icon(Icons.Filled.Add, contentDescription = null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("添加第一张卡")
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "也可以把实体卡贴在手机背面，通过 NFC 自动读取卡号",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
     }
 }
 
@@ -515,6 +608,7 @@ private fun CardDetailOverlay(
     settings: AppSettings,
     onDismiss: () -> Unit,
     onEdit: () -> Unit,
+    onArchive: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -524,6 +618,9 @@ private fun CardDetailOverlay(
     var confirmDelete by remember { mutableStateOf(false) }
     val brand = CardBrand.fromName(card.brand)
     val preset = CardStyles.resolve(card.styleId, card.bankCode, brand)
+
+    // 返回键关闭详情，而不是退出应用
+    BackHandler(onBack = onDismiss)
 
     fun copy(label: String, value: String) {
         container.clipboardHelper.copy(context, label, value, settings.clipboardClearSeconds)
@@ -539,17 +636,18 @@ private fun CardDetailOverlay(
                 onClick = onDismiss,
             )
     ) {
+        // 点空白关闭：滚动列本身承担关闭点击；卡片、信息面板、按钮各自消费自己的点击。
+        // （旧实现在滚动列上放了占满全屏的空拦截层，导致只有边缝能点中关闭）
         Column(
             Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
                 .padding(20.dp)
                 .verticalScroll(rememberScrollState())
-                // 拦截点击，避免点内容误关闭
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = {},
+                    onClick = onDismiss,
                 ),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -577,7 +675,14 @@ private fun CardDetailOverlay(
             Surface(
                 shape = RoundedCornerShape(18.dp),
                 color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // 面板内非复制行/分隔线的点击不应透传成「关闭」
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    ),
             ) {
                 Column {
                     CopyRow("持卡人", card.cardholder) { copy("持卡人", card.cardholder) }
@@ -636,6 +741,26 @@ private fun CardDetailOverlay(
                     Icon(Icons.Filled.Delete, contentDescription = null, Modifier.size(17.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("删除")
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onArchive,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                    border = BorderStroke(1.2.dp, Color.White.copy(alpha = 0.75f)),
+                ) {
+                    Icon(
+                        if (card.archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                        contentDescription = null,
+                        Modifier.size(17.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (card.archived) "取消归档" else "归档")
                 }
                 OutlinedButton(
                     onClick = onDismiss,

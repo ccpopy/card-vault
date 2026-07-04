@@ -2,12 +2,17 @@ package com.cardvault.app.ui
 
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -20,7 +25,6 @@ import androidx.navigation.navArgument
 import com.cardvault.app.AppContainer
 import com.cardvault.app.data.AppSettings
 import com.cardvault.app.nfc.NfcCardDraft
-import com.cardvault.app.nfc.NfcImportEvent
 import com.cardvault.app.ui.edit.EditCardScreen
 import com.cardvault.app.ui.edit.EditCardViewModel
 import com.cardvault.app.ui.home.HomeScreen
@@ -34,13 +38,16 @@ fun AppRoot(container: AppContainer) {
     val settings by container.settingsRepository.settings.collectAsState(initial = AppSettings())
     val locked by container.lockController.locked.collectAsState()
 
-    // 退后台计时，回前台判断是否需要重新锁定
+    // 退后台计时，回前台判断是否需要重新锁定。
+    // observer 只随 lifecycleOwner 注册一次；autoLockSeconds 经 rememberUpdatedState
+    // 读最新值——避免设置变化触发 remove/add observer 时补发 ON_START 的脆弱耦合
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, settings.autoLockSeconds) {
+    val autoLockSeconds by rememberUpdatedState(settings.autoLockSeconds)
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_STOP -> container.lockController.onAppBackground()
-                Lifecycle.Event.ON_START -> container.lockController.onAppForeground(settings.autoLockSeconds)
+                Lifecycle.Event.ON_START -> container.lockController.onAppForeground(autoLockSeconds)
                 else -> {}
             }
         }
@@ -48,42 +55,50 @@ fun AppRoot(container: AppContainer) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // 未开启应用锁时直接进入主界面；locked 仅在开启了 PIN 或生物识别时为 true
-    if (locked) {
-        LockScreen(container)
-    } else {
-        MainNavHost(container, settings)
+    // 覆盖式锁屏：NavHost 常驻，锁定时叠加 LockScreen。
+    // 旧实现是分支替换，锁一次就把返回栈和编辑到一半的表单全部销毁
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(locked) {
+        if (locked) focusManager.clearFocus(force = true)
+    }
+    Box(Modifier.fillMaxSize()) {
+        MainNavHost(container, settings, locked)
+        if (locked) {
+            LockScreen(container)
+        }
     }
 }
 
 @Composable
-private fun MainNavHost(container: AppContainer, settings: AppSettings) {
+private fun MainNavHost(container: AppContainer, settings: AppSettings, locked: Boolean) {
     val navController = rememberNavController()
     val context = LocalContext.current
 
-    LaunchedEffect(navController) {
-        container.nfcImportController.events.collect { event ->
-            when (event) {
-                is NfcImportEvent.CardRead -> {
-                    val draft = event.draft
-                    Toast.makeText(context, "已读取 NFC 卡片", Toast.LENGTH_SHORT).show()
-                    navController.navigate(
-                        "edit?cardId=-1" +
-                            "&nfcNumber=${Uri.encode(draft.number)}" +
-                            "&nfcExpiryMonth=${draft.expiryMonth ?: -1}" +
-                            "&nfcExpiryYear=${draft.expiryYear ?: -1}"
-                    )
-                }
-                is NfcImportEvent.Error -> {
-                    Toast.makeText(context, event.message, Toast.LENGTH_LONG).show()
-                }
-            }
+    // NFC 读卡结果：锁屏时缓冲在 StateFlow 里，解锁后在这里消费；过期(>2分钟)丢弃
+    val pendingNfc by container.nfcImportController.pending.collectAsState()
+    LaunchedEffect(pendingNfc, locked) {
+        val pending = pendingNfc ?: return@LaunchedEffect
+        if (locked) return@LaunchedEffect
+        container.nfcImportController.consume(pending)
+        if (!pending.isFresh()) return@LaunchedEffect
+        val draft = pending.draft
+        Toast.makeText(context, "已读取 NFC 卡片", Toast.LENGTH_SHORT).show()
+        navController.navigate(
+            "edit?cardId=-1" +
+                "&nfcNumber=${Uri.encode(draft.number)}" +
+                "&nfcExpiryMonth=${draft.expiryMonth ?: -1}" +
+                "&nfcExpiryYear=${draft.expiryYear ?: -1}" +
+                "&nfcHolder=${Uri.encode(draft.cardholder.orEmpty())}"
+        ) {
+            launchSingleTop = true
         }
     }
 
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
-            val vm: HomeViewModel = viewModel { HomeViewModel(container.cardRepository) }
+            val vm: HomeViewModel = viewModel {
+                HomeViewModel(container.cardRepository, container.settingsRepository)
+            }
             HomeScreen(
                 vm = vm,
                 container = container,
@@ -95,7 +110,7 @@ private fun MainNavHost(container: AppContainer, settings: AppSettings) {
         }
 
         composable(
-            route = "edit?cardId={cardId}&nfcNumber={nfcNumber}&nfcExpiryMonth={nfcExpiryMonth}&nfcExpiryYear={nfcExpiryYear}",
+            route = "edit?cardId={cardId}&nfcNumber={nfcNumber}&nfcExpiryMonth={nfcExpiryMonth}&nfcExpiryYear={nfcExpiryYear}&nfcHolder={nfcHolder}",
             arguments = listOf(
                 navArgument("cardId") {
                     type = NavType.LongType
@@ -113,17 +128,23 @@ private fun MainNavHost(container: AppContainer, settings: AppSettings) {
                     type = NavType.IntType
                     defaultValue = -1
                 },
+                navArgument("nfcHolder") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
             ),
         ) { backStackEntry ->
             val cardId = backStackEntry.arguments?.getLong("cardId") ?: -1L
             val nfcNumber = backStackEntry.arguments?.getString("nfcNumber").orEmpty()
             val nfcExpiryMonth = backStackEntry.arguments?.getInt("nfcExpiryMonth") ?: -1
             val nfcExpiryYear = backStackEntry.arguments?.getInt("nfcExpiryYear") ?: -1
+            val nfcHolder = backStackEntry.arguments?.getString("nfcHolder").orEmpty()
             val nfcDraft = nfcNumber.takeIf { it.isNotBlank() }?.let {
                 NfcCardDraft(
                     number = it,
                     expiryMonth = nfcExpiryMonth.takeIf { value -> value in 1..12 },
                     expiryYear = nfcExpiryYear.takeIf { value -> value > 0 },
+                    cardholder = nfcHolder.takeIf { value -> value.isNotBlank() },
                 )
             }
             val vm: EditCardViewModel = viewModel(key = "edit_${cardId}_${nfcNumber}") {
@@ -157,6 +178,7 @@ private fun MainNavHost(container: AppContainer, settings: AppSettings) {
                 vm = vm,
                 settings = settings,
                 pinManager = container.pinManager,
+                lockController = container.lockController,
                 onBack = { navController.popBackStack() },
             )
         }

@@ -13,6 +13,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlin.math.abs
 
 /**
@@ -27,8 +30,9 @@ val LocalDeviceTilt = staticCompositionLocalOf<State<Offset>> {
 @Composable
 fun rememberDeviceTilt(): State<Offset> {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val tilt = remember { mutableStateOf(Offset.Zero) }
-    DisposableEffect(Unit) {
+    DisposableEffect(lifecycleOwner) {
         val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val sensor = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
             ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -65,10 +69,35 @@ fun rememberDeviceTilt(): State<Offset> {
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
-        if (sensor != null) {
-            sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_GAME)
+
+        var registered = false
+        fun register() {
+            if (sensor != null && !registered) {
+                sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_GAME)
+                registered = true
+            }
         }
-        onDispose { sm.unregisterListener(listener) }
+        fun unregister() {
+            if (registered) {
+                sm.unregisterListener(listener)
+                registered = false
+            }
+        }
+
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> register()
+                Lifecycle.Event.ON_STOP -> unregister()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) register()
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            unregister()
+        }
     }
     return tilt
 }

@@ -54,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.cardvault.app.data.CardKind
 import com.cardvault.app.domain.CardBrand
 import com.cardvault.app.domain.CardStyles
 import com.cardvault.app.domain.CardValidation
@@ -144,13 +145,18 @@ fun EditCardScreen(
                     current = vm.brand,
                     onSelect = { vm.brandOverride = it.takeIf { b -> b != vm.detectedBrand } },
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
             }
+            KindSelector(
+                current = vm.cardType,
+                onSelect = { vm.cardType = it },
+            )
+            Spacer(Modifier.height(12.dp))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
                     value = vm.expiryRaw,
-                    onValueChange = { vm.expiryRaw = it.filter { c -> c.isDigit() }.take(4) },
+                    onValueChange = { vm.expiryRaw = it.filter { c -> c in '0'..'9' }.take(4) },
                     label = { Text("MM/YY") },
                     placeholder = { Text("08/${EditCardViewModel.currentYearHint()}") },
                     singleLine = true,
@@ -160,7 +166,7 @@ fun EditCardScreen(
                 )
                 OutlinedTextField(
                     value = vm.cvv,
-                    onValueChange = { vm.cvv = it.filter { c -> c.isDigit() }.take(4) },
+                    onValueChange = { vm.cvv = it.filter { c -> c in '0'..'9' }.take(4) },
                     label = { Text("CVV") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
@@ -223,7 +229,7 @@ fun EditCardScreen(
             )
             Spacer(Modifier.height(24.dp))
 
-            validationError?.let {
+            (validationError ?: vm.saveError)?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
                 Spacer(Modifier.height(8.dp))
             }
@@ -236,8 +242,9 @@ fun EditCardScreen(
                         validationError = err
                         if (err == null) vm.save(onBack)
                     },
+                    enabled = !vm.saving,
                     modifier = Modifier.weight(1f),
-                ) { Text("保存") }
+                ) { Text(if (vm.saving) "保存中…" else "保存") }
             }
             Spacer(Modifier.height(32.dp))
         }
@@ -274,6 +281,42 @@ private fun BrandSelector(
                         },
                         onClick = {
                             onSelect(b)
+                            expanded = false
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KindSelector(
+    current: String?,
+    onSelect: (String?) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("卡类型：", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box {
+            FilterChip(
+                selected = current != null,
+                onClick = { expanded = true },
+                label = { Text(CardKind.fromKey(current)?.label ?: "未指定") },
+            )
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                DropdownMenuItem(
+                    text = { Text("未指定") },
+                    onClick = {
+                        onSelect(null)
+                        expanded = false
+                    },
+                )
+                CardKind.entries.forEach { kind ->
+                    DropdownMenuItem(
+                        text = { Text(kind.label) },
+                        onClick = {
+                            onSelect(kind.key)
                             expanded = false
                         },
                     )

@@ -5,43 +5,82 @@ import android.nfc.tech.IsoDep
 
 class NfcCardReader {
     fun read(tag: Tag): NfcCardDraft {
-        val isoDep = IsoDep.get(tag) ?: error("当前 NFC 卡片不支持 ISO-DEP")
+        val isoDep = IsoDep.get(tag) ?: error("当前 NFC 卡片不支持读取（非 ISO-DEP 协议）")
         isoDep.timeout = 5000
         isoDep.connect()
         try {
-            val aid = selectPaymentApplication(isoDep)
-            val selected = transceiveOk(isoDep, selectAid(aid))
-            val gpo = getProcessingOptions(isoDep, aid, selected)
-            val payloads = readCardPayloads(isoDep, gpo)
-            val tlvs = payloads.flatMap { parseTlvs(it) }
-            val pan = tlvs.firstValue(0x5A)?.toHexDigits()
-                ?: tlvs.firstValue(0x57)?.track2Pan()
-                ?: error("未从 NFC 卡片读取到卡号。该卡未在 AFL 记录或 GPO 响应中提供 5A/57 卡号字段。")
-            val expiry = tlvs.firstValue(0x5F24)?.expiryFromDate()
-                ?: tlvs.firstValue(0x57)?.track2Expiry()
-            return NfcCardDraft(
-                number = pan.filter { it.isDigit() },
-                expiryMonth = expiry?.first,
-                expiryYear = expiry?.second,
-            )
+            val candidates = candidateAids(isoDep)
+            if (candidates.isEmpty()) error("未找到可读取的银行卡应用")
+            // 双标卡/多应用卡：按 PPSE 声明的优先级逐个尝试，
+            // 第一应用关闭非接或读取失败时回退到下一个，而不是直接报错
+            var lastError: Throwable? = null
+            for (aid in candidates) {
+                try {
+                    return readWithAid(isoDep, aid)
+                } catch (e: Throwable) {
+                    lastError = preferError(lastError, e)
+                }
+            }
+            throw lastError ?: IllegalStateException("未能从卡片读取到卡号")
         } finally {
             isoDep.close()
         }
     }
 
-    private fun selectPaymentApplication(isoDep: IsoDep): ByteArray {
-        val ppse = runCatching {
-            transceiveOk(isoDep, selectByName("2PAY.SYS.DDF01"))
-        }.getOrNull()
-        val aidFromDirectory = ppse
-            ?.let { parseTlvs(it).flatMap { tlv -> tlv.findAll(0x4F) } }
-            ?.firstOrNull()
-        if (aidFromDirectory != null) return aidFromDirectory
+    /** 保留信息量更大的错误：6985（卡未开放非接）的解释比泛化失败更有用 */
+    private fun preferError(old: Throwable?, new: Throwable): Throwable = when {
+        old == null -> new
+        old.message?.contains("6985") == true -> old
+        else -> new
+    }
 
-        KNOWN_AIDS.forEach { aid ->
-            if (runCatching { transceiveOk(isoDep, selectAid(aid)) }.isSuccess) return aid
+    /**
+     * 枚举候选支付应用：
+     * 1. PPSE 目录中的应用模板（tag 61），按 Application Priority Indicator（tag 87）排序；
+     * 2. 目录缺失/为空时退回裸 4F 列表；
+     * 3. 追加常见 AID 兜底，去重后最多尝试 8 个。
+     */
+    private fun candidateAids(isoDep: IsoDep): List<ByteArray> {
+        val ppseTlvs = runCatching {
+            parseTlvs(transceiveOk(isoDep, selectByName("2PAY.SYS.DDF01")))
+        }.getOrNull().orEmpty()
+
+        val templates = ppseTlvs.flatMap { it.flatten() }.filter { it.tag == 0x61 }
+        val fromTemplates = templates.mapNotNull { template ->
+            val aid = template.children.firstOrNull { it.tag == 0x4F }?.value
+                ?: return@mapNotNull null
+            val priority = template.children.firstOrNull { it.tag == 0x87 }
+                ?.value?.firstOrNull()?.toInt()?.and(0x7F) ?: Int.MAX_VALUE
+            aid to priority
+        }.sortedBy { it.second }.map { it.first }
+
+        val fromDirectory = fromTemplates.ifEmpty {
+            ppseTlvs.flatMap { it.findAll(0x4F) }
         }
-        error("未找到可读取的银行卡应用")
+
+        val result = mutableListOf<ByteArray>()
+        (fromDirectory + KNOWN_AIDS).forEach { aid ->
+            if (result.none { it.contentEquals(aid) }) result += aid
+        }
+        return result.take(8)
+    }
+
+    private fun readWithAid(isoDep: IsoDep, aid: ByteArray): NfcCardDraft {
+        val selected = transceiveOk(isoDep, selectAid(aid))
+        val gpo = getProcessingOptions(isoDep, aid, selected)
+        val payloads = readCardPayloads(isoDep, gpo)
+        val tlvs = payloads.flatMap { parseTlvs(it) }
+        val pan = tlvs.firstValue(0x5A)?.toHexDigits()
+            ?: tlvs.firstValue(0x57)?.track2Pan()
+            ?: error("未从 NFC 卡片读取到卡号。该卡未在 AFL 记录或 GPO 响应中提供 5A/57 卡号字段。")
+        val expiry = tlvs.firstValue(0x5F24)?.expiryFromDate()
+            ?: tlvs.firstValue(0x57)?.track2Expiry()
+        return NfcCardDraft(
+            number = pan.filter { it in '0'..'9' },
+            expiryMonth = expiry?.first,
+            expiryYear = expiry?.second,
+            cardholder = tlvs.firstValue(0x5F20)?.decodeCardholder(),
+        )
     }
 
     private fun getProcessingOptions(
@@ -70,6 +109,7 @@ class NfcCardReader {
     }
 
     private fun tryGpo(isoDep: IsoDep, field: ByteArray): GpoResult {
+        require(field.size <= 255) { "GPO 命令数据超长" }
         val apdu = byteArrayOf(0x80.toByte(), 0xA8.toByte(), 0x00, 0x00, field.size.toByte()) +
             field + byteArrayOf(0x00)
         val response = isoDep.transceive(apdu)
@@ -87,7 +127,13 @@ class NfcCardReader {
     /** 组装 GPO 的命令模板（tag 83）。无 PDOL 时为 83 00，有则按需填充终端数据 */
     private fun buildGpoField(pdol: ByteArray?, ttq: ByteArray): ByteArray {
         val pdolData = if (pdol == null) ByteArray(0) else buildPdolData(pdol, ttq)
-        return byteArrayOf(0x83.toByte(), pdolData.size.toByte()) + pdolData
+        // TLV 长度 >127 需要 81 前缀的长格式（PDOL 请求项极多时才会触发）
+        val header = if (pdolData.size > 127) {
+            byteArrayOf(0x83.toByte(), 0x81.toByte(), pdolData.size.toByte())
+        } else {
+            byteArrayOf(0x83.toByte(), pdolData.size.toByte())
+        }
+        return header + pdolData
     }
 
     /**
@@ -203,12 +249,18 @@ class NfcCardReader {
         val result = mutableListOf<Tlv>()
         var index = 0
         while (index < bytes.size) {
+            // EMV 允许记录里出现 00/FF 填充字节，必须跳过，否则会被误当 tag 消费
+            val lead = bytes[index].toInt() and 0xFF
+            if (lead == 0x00 || lead == 0xFF) {
+                index++
+                continue
+            }
             val tagStart = index
             index = skipTag(bytes, index)
             if (index >= bytes.size) break
-            val lengthInfo = readLength(bytes, index)
+            val lengthInfo = readLength(bytes, index) ?: break
             index = lengthInfo.nextIndex
-            if (index + lengthInfo.length > bytes.size) break
+            if (lengthInfo.length < 0 || index + lengthInfo.length > bytes.size) break
             val tag = bytes.copyOfRange(tagStart, lengthInfo.tagEnd).toTagInt()
             val value = bytes.copyOfRange(index, index + lengthInfo.length)
             val constructed = (bytes[tagStart].toInt() and 0x20) == 0x20
@@ -227,11 +279,13 @@ class NfcCardReader {
         return index
     }
 
-    private fun readLength(bytes: ByteArray, start: Int): LengthInfo {
+    /** 长度字节越界/格式非法时返回 null，由调用方终止解析——畸形响应不应抛数组越界 */
+    private fun readLength(bytes: ByteArray, start: Int): LengthInfo? {
         val first = bytes[start].toInt() and 0xFF
         if ((first and 0x80) == 0) return LengthInfo(first, start + 1, start)
         val count = first and 0x7F
-        require(count in 1..3) { "NFC TLV 长度格式无效" }
+        if (count !in 1..3) return null
+        if (start + count >= bytes.size) return null
         var length = 0
         repeat(count) { offset ->
             length = (length shl 8) or (bytes[start + 1 + offset].toInt() and 0xFF)
@@ -278,6 +332,20 @@ class NfcCardReader {
         return month to (2000 + yy)
     }
 
+    /** 持卡人姓名（tag 5F20）：EMV 格式常见 "SURNAME/GIVEN"，转为空格分隔并去掉占位值 */
+    private fun ByteArray.decodeCardholder(): String? {
+        val raw = toString(Charsets.US_ASCII)
+        val name = raw.replace('/', ' ')
+            .filter { it.code in 0x20..0x7E }
+            .trim()
+            .replace(Regex("\\s+"), " ")
+        if (name.isEmpty() || name.length > 26) return null
+        if (name.none { it.isLetter() }) return null
+        // 常见占位：全斜杠、单点、CARDHOLDER 之类
+        if (name.equals("CARDHOLDER", ignoreCase = true) || name == ".") return null
+        return name
+    }
+
     private data class Tlv(
         val tag: Int,
         val value: ByteArray,
@@ -298,12 +366,14 @@ class NfcCardReader {
         private val TTQ_ALTERNATE = byteArrayOf(0x27, 0x00, 0x00, 0x00)
 
         private val KNOWN_AIDS = listOf(
-            "A000000333010101",
-            "A0000000031010",
-            "A0000000041010",
-            "A00000002501",
-            "A0000000651010",
-            "A0000001523010",
+            "A000000333010101", // 银联借记
+            "A000000333010102", // 银联贷记
+            "A000000333010103", // 银联准贷记
+            "A0000000031010",   // Visa
+            "A0000000041010",   // Mastercard
+            "A00000002501",     // Amex
+            "A0000000651010",   // JCB
+            "A0000001523010",   // Discover
         ).map { hex ->
             hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         }

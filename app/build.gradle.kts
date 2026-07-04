@@ -131,4 +131,6 @@ dependencies {
 
     // 网络（发卡行在线验证，支持 SOCKS5 代理）
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    testImplementation("junit:junit:4.13.2")
 }

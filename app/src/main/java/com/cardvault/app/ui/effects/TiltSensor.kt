@@ -13,6 +13,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
+import kotlin.math.abs
 
 /**
  * 设备倾斜状态（x/y ∈ -1..1，已低通平滑）。
@@ -53,10 +54,13 @@ fun rememberDeviceTilt(): State<Offset> {
                 val dy = ((gy - baseY) * 2.6f).coerceIn(-1f, 1f)
                 val prev = tilt.value
                 // 低通平滑，去抖动同时保持跟手
-                tilt.value = Offset(
-                    prev.x + (dx - prev.x) * 0.16f,
-                    prev.y + (dy - prev.y) * 0.16f,
-                )
+                val nx = prev.x + (dx - prev.x) * 0.16f
+                val ny = prev.y + (dy - prev.y) * 0.16f
+                // 变化阈值门控：手机静置时传感器噪声不再触发状态更新，
+                // 否则列表里每张可见卡都会被这 50Hz 的噪声拖着持续重绘
+                if (abs(nx - prev.x) > 0.002f || abs(ny - prev.y) > 0.002f) {
+                    tilt.value = Offset(nx, ny)
+                }
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}

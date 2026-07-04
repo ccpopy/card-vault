@@ -12,11 +12,11 @@ class NfcCardReader {
             val aid = selectPaymentApplication(isoDep)
             val selected = transceiveOk(isoDep, selectAid(aid))
             val gpo = getProcessingOptions(isoDep, aid, selected)
-            val records = readRecords(isoDep, gpo)
-            val tlvs = records.flatMap { parseTlvs(it) }
+            val payloads = readCardPayloads(isoDep, gpo)
+            val tlvs = payloads.flatMap { parseTlvs(it) }
             val pan = tlvs.firstValue(0x5A)?.toHexDigits()
                 ?: tlvs.firstValue(0x57)?.track2Pan()
-                ?: error("未从 NFC 卡片读取到卡号")
+                ?: error("未从 NFC 卡片读取到卡号。该卡未在 AFL 记录或 GPO 响应中提供 5A/57 卡号字段。")
             val expiry = tlvs.firstValue(0x5F24)?.expiryFromDate()
                 ?: tlvs.firstValue(0x57)?.track2Expiry()
             return NfcCardDraft(
@@ -144,8 +144,17 @@ class NfcCardReader {
     private fun randomBytes(count: Int): ByteArray =
         ByteArray(count).also { kotlin.random.Random.nextBytes(it) }
 
+    private fun readCardPayloads(isoDep: IsoDep, gpo: ByteArray): List<ByteArray> {
+        val records = readRecords(isoDep, gpo)
+        return if (records.isEmpty()) {
+            listOf(gpo)
+        } else {
+            records + gpo
+        }
+    }
+
     private fun readRecords(isoDep: IsoDep, gpo: ByteArray): List<ByteArray> {
-        val afl = extractAfl(gpo) ?: error("NFC 卡片未返回 AFL 记录索引")
+        val afl = extractAfl(gpo) ?: return emptyList()
         require(afl.size % 4 == 0) { "NFC AFL 记录索引格式无效" }
         val records = mutableListOf<ByteArray>()
         afl.asIterable().chunked(4).forEach { entry ->
@@ -160,7 +169,6 @@ class NfcCardReader {
                 if (response != null) records += response
             }
         }
-        require(records.isNotEmpty()) { "NFC 卡片未返回可读取记录" }
         return records
     }
 

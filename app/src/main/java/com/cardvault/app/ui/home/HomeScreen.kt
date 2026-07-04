@@ -76,6 +76,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -298,9 +299,11 @@ fun HomeScreen(
                     verticalArrangement = Arrangement.spacedBy(-stackOverlap),
                 ) {
                     itemsIndexed(displayCards, key = { _, c -> c.id }) { index, card ->
-                        val preset = CardStyles.resolve(
-                            card.styleId, card.bankCode, CardBrand.fromName(card.brand)
-                        )
+                        val preset = remember(card.styleId, card.bankCode, card.brand) {
+                            CardStyles.resolve(
+                                card.styleId, card.bankCode, CardBrand.fromName(card.brand)
+                            )
+                        }
                         val lifted = liftedId == card.id
                         // 拎起：轻微放大 + 阴影加深；抬手立即回落，与位移回弹并行
                         val liftScale by animateFloatAsState(
@@ -361,16 +364,38 @@ fun HomeScreen(
                                 .onSizeChanged { itemHeightPx = it.height }
                                 .then(dragModifier)
                                 .graphicsLayer {
+                                    var manualOffset = 0f
                                     if (draggingId == card.id) {
                                         val raw = dragOffsetPx
                                         // 拖出首尾之外时加阻尼，仿 iOS 橡皮筋
-                                        translationY = if (
+                                        manualOffset = if (
                                             (index == 0 && raw < 0f) ||
                                             (index == displayCards.lastIndex && raw > 0f)
                                         ) raw * 0.35f else raw
+                                        translationY = manualOffset
                                     }
-                                    scaleX = liftScale
-                                    scaleY = liftScale
+                                    // 顶部收纳：卡片顶边越过视口上缘后轻微缩小、变暗，
+                                    // 像被塞回卡包一样滑进上方卡片底下再离场。
+                                    // 纯粹是滚动位置的函数——滚动帧只更新图层矩阵，
+                                    // 不触发重组也不重录制绘制指令
+                                    val step = itemHeightPx - stackOverlapPx
+                                    var tuck = 0f
+                                    if (step > 0f) {
+                                        val info = listState.layoutInfo
+                                        val item = info.visibleItemsInfo
+                                            .firstOrNull { it.key == card.id }
+                                        if (item != null) {
+                                            tuck = ((info.viewportStartOffset -
+                                                (item.offset + manualOffset)) / (step * 0.6f))
+                                                .coerceIn(0f, 1f)
+                                        }
+                                    }
+                                    // 顶边为轴：收纳时卡片底部先退后，顶边保持贴着滑出轨迹
+                                    transformOrigin = TransformOrigin(0.5f, 0f)
+                                    val scale = liftScale * (1f - 0.05f * tuck)
+                                    scaleX = scale
+                                    scaleY = scale
+                                    alpha = 1f - 0.16f * tuck * tuck
                                 }
                                 .shadow(liftElevation, RoundedCornerShape(20.dp))
                         ) {

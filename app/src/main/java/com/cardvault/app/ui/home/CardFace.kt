@@ -27,14 +27,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
@@ -86,6 +85,12 @@ private val HoloColors = listOf(
     Color(0xFFFF3B6B), // 回到品红，保证平铺无缝
 )
 
+// 按透明度预先调好的色带（普通 / 浅色卡面减半），绘制阶段零分配
+private val HoloMainColors = HoloColors.map { it.copy(alpha = 0.13f) }
+private val HoloMainColorsLight = HoloColors.map { it.copy(alpha = 0.065f) }
+private val HoloCrossColors = HoloColors.map { it.copy(alpha = 0.065f) }
+private val HoloCrossColorsLight = HoloColors.map { it.copy(alpha = 0.0325f) }
+
 /**
  * 卡面光效。两种风格共用同一套倾斜/待机漂移输入：
  *
@@ -97,111 +102,116 @@ private val HoloColors = listOf(
  *
  * 覆膜反光（HOLO_EFFECT = false）：仅白色光带 + 同心柔光。
  *
- * animated = true（详情弹窗、编辑预览）时相位随时间缓慢爬行，静置也在变色；
- * animated = false（列表堆叠）不跑动画帧，仅随传感器变化重绘。
+ * time != null（详情弹窗、编辑预览，单卡）：相位随时间缓慢爬行，并绘制完整四层；
+ * time == null（列表堆叠，同屏十几张互相覆盖）：只画主彩虹层 + 白色高光带两层，
+ * 交叉干涉层和柔光晕在 70dp 露出条上不可辨，省一半混合填充。
+ *
+ * 倾斜与时间都只在绘制阶段读取——传感器更新只触发重绘，不触发重组。
  * lightSurface = true（鎏金等浅色卡面）时彩虹透明度减半，避免发脏。
  */
 fun Modifier.cardShimmer(
     enabled: Boolean,
-    animated: Boolean = true,
+    tilt: State<Offset>,
+    time: State<Float>? = null,
     lightSurface: Boolean = false,
-): Modifier =
-    if (!enabled) this else composed {
-        val tiltState = LocalDeviceTilt.current
+): Modifier = if (!enabled) this else drawWithContent {
+    drawContent()
+    val w = size.width
+    val h = size.height
+    val t = tilt.value
+    val crawl = time?.value ?: 0f
+    val rich = time != null
 
-        var timeSec by remember { mutableFloatStateOf(0f) }
-        if (animated) {
-            LaunchedEffect(Unit) {
-                var startNanos = 0L
-                while (true) {
-                    withFrameNanos { frame ->
-                        if (startNanos == 0L) startNanos = frame
-                        timeSec = ((frame - startNanos) / 1_000_000_000.0).toFloat()
-                    }
-                }
-            }
-        }
+    if (HOLO_EFFECT) {
+        // 主全息层：相位增益放大，小幅倾斜即可看到明显色变
+        val cycleA = w * 1.25f
+        val phaseA = (t.x * 1.35f - t.y * 0.85f + crawl * 0.055f) * cycleA
+        drawRect(
+            brush = Brush.linearGradient(
+                colors = if (lightSurface) HoloMainColorsLight else HoloMainColors,
+                start = Offset(SheenNormal.x * phaseA, SheenNormal.y * phaseA),
+                end = Offset(
+                    SheenNormal.x * (phaseA + cycleA),
+                    SheenNormal.y * (phaseA + cycleA),
+                ),
+                tileMode = TileMode.Repeated,
+            ),
+            blendMode = BlendMode.Plus,
+        )
 
-        drawWithContent {
-            drawContent()
-            val w = size.width
-            val h = size.height
-            val tilt = tiltState.value
-
-            if (HOLO_EFFECT) {
-                val alphaScale = if (lightSurface) 0.5f else 1f
-                val crawl = if (animated) timeSec else 0f
-
-                // 主全息层：相位增益放大，小幅倾斜即可看到明显色变
-                val cycleA = w * 1.25f
-                val phaseA = (tilt.x * 1.35f - tilt.y * 0.85f + crawl * 0.055f) * cycleA
-                drawRect(
-                    brush = Brush.linearGradient(
-                        colors = HoloColors.map { it.copy(alpha = 0.13f * alphaScale) },
-                        start = Offset(SheenNormal.x * phaseA, SheenNormal.y * phaseA),
-                        end = Offset(
-                            SheenNormal.x * (phaseA + cycleA),
-                            SheenNormal.y * (phaseA + cycleA),
-                        ),
-                        tileMode = TileMode.Repeated,
-                    ),
-                    blendMode = BlendMode.Plus,
-                )
-
-                // 交叉副层：反向滑动，低透明度
-                val cycleB = w * 0.90f
-                val phaseB = (-tilt.x * 0.90f - tilt.y * 1.10f - crawl * 0.038f) * cycleB
-                drawRect(
-                    brush = Brush.linearGradient(
-                        colors = HoloColors.map { it.copy(alpha = 0.065f * alphaScale) },
-                        start = Offset(HoloCrossNormal.x * phaseB, HoloCrossNormal.y * phaseB),
-                        end = Offset(
-                            HoloCrossNormal.x * (phaseB + cycleB),
-                            HoloCrossNormal.y * (phaseB + cycleB),
-                        ),
-                        tileMode = TileMode.Repeated,
-                    ),
-                    blendMode = BlendMode.Plus,
-                )
-            }
-
-            // 白色镜面高光：全息版收敛一些，让彩虹当主角；回退版为主光效
-            val coreAlpha = if (HOLO_EFFECT) 0.075f else 0.105f
-            val softAlpha = if (HOLO_EFFECT) 0.025f else 0.035f
-            val haloAlpha = if (HOLO_EFFECT) 0.035f else 0.055f
-
-            val idle = if (animated) sin(timeSec * TAU / 11f) * 0.09f else 0f
-            val shift = (tilt.x * 0.60f - tilt.y * 0.38f + idle).coerceIn(-0.85f, 0.85f)
-            val bandOffset = shift * w * 0.85f
-            val center = Offset(
-                w * 0.50f + SheenNormal.x * bandOffset,
-                h * 0.45f + SheenNormal.y * bandOffset,
-            )
-            val halfSpan = w * 0.46f
+        if (rich) {
+            // 交叉副层：反向滑动，低透明度
+            val cycleB = w * 0.90f
+            val phaseB = (-t.x * 0.90f - t.y * 1.10f - crawl * 0.038f) * cycleB
             drawRect(
                 brush = Brush.linearGradient(
-                    colors = listOf(
-                        Color.Transparent,
-                        Color.White.copy(alpha = softAlpha),
-                        Color.White.copy(alpha = coreAlpha),
-                        Color.White.copy(alpha = softAlpha),
-                        Color.Transparent,
+                    colors = if (lightSurface) HoloCrossColorsLight else HoloCrossColors,
+                    start = Offset(HoloCrossNormal.x * phaseB, HoloCrossNormal.y * phaseB),
+                    end = Offset(
+                        HoloCrossNormal.x * (phaseB + cycleB),
+                        HoloCrossNormal.y * (phaseB + cycleB),
                     ),
-                    start = Offset(center.x - SheenNormal.x * halfSpan, center.y - SheenNormal.y * halfSpan),
-                    end = Offset(center.x + SheenNormal.x * halfSpan, center.y + SheenNormal.y * halfSpan),
-                ),
-                blendMode = BlendMode.Plus,
-            )
-            drawRect(
-                brush = Brush.radialGradient(
-                    colors = listOf(Color.White.copy(alpha = haloAlpha), Color.Transparent),
-                    center = center,
-                    radius = w * 0.80f,
+                    tileMode = TileMode.Repeated,
                 ),
                 blendMode = BlendMode.Plus,
             )
         }
     }
+
+    // 白色镜面高光：全息版收敛一些，让彩虹当主角；回退版为主光效
+    val coreAlpha = if (HOLO_EFFECT) 0.075f else 0.105f
+    val softAlpha = if (HOLO_EFFECT) 0.025f else 0.035f
+
+    val idle = if (rich) sin(crawl * TAU / 11f) * 0.09f else 0f
+    val shift = (t.x * 0.60f - t.y * 0.38f + idle).coerceIn(-0.85f, 0.85f)
+    val bandOffset = shift * w * 0.85f
+    val center = Offset(
+        w * 0.50f + SheenNormal.x * bandOffset,
+        h * 0.45f + SheenNormal.y * bandOffset,
+    )
+    val halfSpan = w * 0.46f
+    drawRect(
+        brush = Brush.linearGradient(
+            colors = listOf(
+                Color.Transparent,
+                Color.White.copy(alpha = softAlpha),
+                Color.White.copy(alpha = coreAlpha),
+                Color.White.copy(alpha = softAlpha),
+                Color.Transparent,
+            ),
+            start = Offset(center.x - SheenNormal.x * halfSpan, center.y - SheenNormal.y * halfSpan),
+            end = Offset(center.x + SheenNormal.x * halfSpan, center.y + SheenNormal.y * halfSpan),
+        ),
+        blendMode = BlendMode.Plus,
+    )
+    if (rich) {
+        val haloAlpha = if (HOLO_EFFECT) 0.035f else 0.055f
+        drawRect(
+            brush = Brush.radialGradient(
+                colors = listOf(Color.White.copy(alpha = haloAlpha), Color.Transparent),
+                center = center,
+                radius = w * 0.80f,
+            ),
+            blendMode = BlendMode.Plus,
+        )
+    }
+}
+
+/** 详情/预览用的光效时钟：驱动待机漂移，列表卡不启动它 */
+@Composable
+private fun rememberShimmerClock(): State<Float> {
+    val time = remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(Unit) {
+        var startNanos = 0L
+        while (true) {
+            withFrameNanos { frame ->
+                if (startNanos == 0L) startNanos = frame
+                time.floatValue = ((frame - startNanos) / 1_000_000_000.0).toFloat()
+            }
+        }
+    }
+    return time
+}
 
 /** 可翻转银行卡：点击翻面；onToggleReveal 非空时在卡面内嵌显示/隐藏切换钮 */
 @Composable
@@ -256,11 +266,13 @@ fun BankCardFront(
 ) {
     val tint = if (preset.darkText) Color(0xDD1A1A1A) else Color.White
     val brand = CardBrand.fromName(card.brand)
+    val tilt = LocalDeviceTilt.current
+    val shimmerTime = if (animated && preset.shimmer) rememberShimmerClock() else null
     Box(
         modifier
             .clip(RoundedCornerShape(20.dp))
             .background(Brush.linearGradient(preset.colors))
-            .cardShimmer(preset.shimmer, animated, preset.darkText)
+            .cardShimmer(preset.shimmer, tilt, shimmerTime, preset.darkText)
             .padding(20.dp)
     ) {
         Column(Modifier.fillMaxSize()) {
@@ -343,11 +355,13 @@ fun BankCardBack(
 ) {
     val tint = if (preset.darkText) Color(0xDD1A1A1A) else Color.White
     val brand = CardBrand.fromName(card.brand)
+    val tilt = LocalDeviceTilt.current
+    val shimmerTime = if (animated && preset.shimmer) rememberShimmerClock() else null
     Box(
         modifier
             .clip(RoundedCornerShape(20.dp))
             .background(Brush.linearGradient(preset.colors.reversed()))
-            .cardShimmer(preset.shimmer, animated, preset.darkText)
+            .cardShimmer(preset.shimmer, tilt, shimmerTime, preset.darkText)
     ) {
         Column(Modifier.fillMaxSize()) {
             Spacer(Modifier.height(22.dp))

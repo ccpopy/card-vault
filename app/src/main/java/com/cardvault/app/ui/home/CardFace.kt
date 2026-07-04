@@ -264,6 +264,7 @@ fun BankCardFront(
     modifier: Modifier = Modifier,
     onToggleReveal: (() -> Unit)? = null,
     animated: Boolean = false,
+    statusBadge: (@Composable () -> Unit)? = null,
 ) {
     val tint = if (preset.darkText) Color(0xDD1A1A1A) else Color.White
     val brand = CardBrand.fromName(card.brand)
@@ -291,6 +292,12 @@ fun BankCardFront(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                // 到期角标内嵌在顶行（银行名与卡组织标志之间）：
+                // 堆叠列表只露出卡片顶部条带，放这里任何屏宽都可见，也不会盖住标志
+                if (statusBadge != null) {
+                    statusBadge()
+                    Spacer(Modifier.width(8.dp))
+                }
                 BrandMark(brand, tint)
                 if (onToggleReveal != null) {
                     Spacer(Modifier.width(10.dp))

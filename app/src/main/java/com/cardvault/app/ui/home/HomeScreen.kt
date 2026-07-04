@@ -6,17 +6,25 @@ import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.AnchoredDraggableState
+import androidx.compose.foundation.gestures.DraggableAnchors
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.anchoredDraggable
+import androidx.compose.foundation.gestures.animateTo
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +36,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -36,13 +45,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Delete
@@ -52,7 +66,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -61,9 +74,8 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -75,6 +87,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -83,22 +96,32 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -110,10 +133,18 @@ import com.cardvault.app.data.CardSortMode
 import com.cardvault.app.domain.CardBrand
 import com.cardvault.app.domain.CardStyles
 import com.cardvault.app.domain.CardValidation
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** 左滑露出的操作区：圆形操作钮尺寸与展开总宽（3 钮 + 间距 + 边距） */
+private val SwipeActionSize = 44.dp
+private val SwipeRevealWidth = 168.dp
+
+/** 卡片左滑的两个锚点：收起 / 露出操作区 */
+private enum class SwipeAnchor { Closed, Open }
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     vm: HomeViewModel,
@@ -138,6 +169,10 @@ fun HomeScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // 左滑操作区：同一时间只允许一张卡展开；删除走确认弹窗
+    var openSwipeId by remember { mutableStateOf<Long?>(null) }
+    var confirmDeleteCard by remember { mutableStateOf<CardEntity?>(null) }
+
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -147,6 +182,8 @@ fun HomeScreen(
     val stackOverlapPx = with(density) { stackOverlap.toPx() }
     val edgeZonePx = with(density) { 92.dp.toPx() }
     val maxAutoScrollPxPerSec = with(density) { 540.dp.toPx() }
+    val swipeRevealPx = with(density) { SwipeRevealWidth.toPx() }
+    val swipeVelocityPx = with(density) { 125.dp.toPx() }
 
     // 拖拽排序（仿 Apple 钱包）：liftedId 表示手指仍按住的卡，
     // draggingId 表示位移仍归手动控制的卡——松手后回弹期间依然持有，动画结束才交还
@@ -232,6 +269,36 @@ fun HomeScreen(
         if (draggingId == null) workingOrder = null
     }
 
+    // 归档 / 删除：左滑操作钮触发，Snackbar 提示并支持撤销删除
+    fun archiveCard(card: CardEntity) {
+        val target = !card.archived
+        vm.setArchived(card, target)
+        scope.launch {
+            snackbarHostState.showSnackbar(
+                if (target) "已归档，可在「已归档」分类中找到" else "已取消归档"
+            )
+        }
+    }
+
+    fun deleteCard(card: CardEntity) {
+        vm.delete(card)
+        scope.launch {
+            val result = snackbarHostState.showSnackbar(
+                message = "已删除「${card.bankName.ifBlank { "银行卡" }} •••• ${card.number.takeLast(4)}」",
+                actionLabel = "撤销",
+                duration = SnackbarDuration.Long,
+            )
+            if (result == SnackbarResult.ActionPerformed) vm.restore(card)
+        }
+    }
+
+    // 列表开始滚动时收起已左滑展开的卡片
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling) openSwipeId = null
+        }
+    }
+
     // 边缘自动滚动：手指停住也持续滚；滚动量补偿进位移，让卡钉在手指下
     LaunchedEffect(draggingId) {
         if (draggingId == null) return@LaunchedEffect
@@ -272,17 +339,13 @@ fun HomeScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedTextField(
+                SearchField(
                     value = searchText,
                     onValueChange = {
                         searchText = it
                         vm.query.value = it
                     },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("搜索持卡人 / 银行 / 卡号…") },
-                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
                 )
                 SortMenuButton(current = uiState.sortMode, onSelect = vm::setSortMode)
                 IconButton(onClick = onSettings) {
@@ -290,9 +353,12 @@ fun HomeScreen(
                 }
             }
 
-            // 到期分类
+            // 到期分类（计数多时可横向滚动，避免窄屏溢出换行）
             Row(
-                Modifier.padding(horizontal = 16.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CardFilter.entries.forEach { f ->
@@ -321,7 +387,10 @@ fun HomeScreen(
             } else {
                 // 搜索词/筛选变化后列表数据集变了，旧的滚动锚点会把内容顶出屏幕，
                 // 统一回到顶部（修复：删除搜索词后卡片被顶上去，收起键盘才恢复）
-                LaunchedEffect(searchText, filter) { listState.scrollToItem(0) }
+                LaunchedEffect(searchText, filter) {
+                    openSwipeId = null
+                    listState.scrollToItem(0)
+                }
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
@@ -352,6 +421,7 @@ fun HomeScreen(
                                 detectDragGesturesAfterLongPress(
                                     onDragStart = {
                                         settleJob?.cancel()
+                                        openSwipeId = null
                                         // 回弹途中再次拎起同一张卡：保留残余位移接着拖，不跳变
                                         if (draggingId != card.id) dragOffsetPx = 0f
                                         liftedId = card.id
@@ -373,6 +443,35 @@ fun HomeScreen(
                             }
                         } else {
                             Modifier
+                        }
+                        // 左滑露出操作区：每张卡自持锚点状态（收起 / 展开）
+                        val swipeState = remember(card.id) {
+                            AnchoredDraggableState(
+                                initialValue = SwipeAnchor.Closed,
+                                anchors = DraggableAnchors {
+                                    SwipeAnchor.Closed at 0f
+                                    SwipeAnchor.Open at -swipeRevealPx
+                                },
+                                positionalThreshold = { distance -> distance * 0.45f },
+                                velocityThreshold = { swipeVelocityPx },
+                                snapAnimationSpec = spring(dampingRatio = 0.85f, stiffness = 380f),
+                                decayAnimationSpec = exponentialDecay(),
+                            )
+                        }
+                        LaunchedEffect(swipeState) {
+                            snapshotFlow { swipeState.currentValue }.collect { value ->
+                                if (value == SwipeAnchor.Open) openSwipeId = card.id
+                                else if (openSwipeId == card.id) openSwipeId = null
+                            }
+                        }
+                        // 另一张卡展开 / 滚动 / 筛选变化 / 进入拖拽排序时，把本卡收回
+                        LaunchedEffect(openSwipeId) {
+                            if (openSwipeId != card.id && swipeState.currentValue == SwipeAnchor.Open) {
+                                swipeState.animateTo(SwipeAnchor.Closed)
+                            }
+                        }
+                        val swipeExposed by remember(swipeState) {
+                            derivedStateOf { swipeState.offset < -0.5f }
                         }
                         Box(
                             Modifier
@@ -428,21 +527,81 @@ fun HomeScreen(
                                     scaleY = scale
                                     alpha = 1f - 0.16f * tuck * tuck
                                 }
-                                .shadow(liftElevation, RoundedCornerShape(20.dp))
                         ) {
-                            BankCardFront(
-                                card = card,
-                                preset = preset,
-                                masked = settings.maskNumbers,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(1.586f)
-                                    .clickable {
-                                        detailCard = card
-                                        showDetail = true
+                            // 操作钮固定在卡片的可见条带内（堆叠只露出顶部这一段），
+                            // 收起时不参与组合，避免被无障碍焦点/误触碰到
+                            if (swipeExposed) {
+                                val stripHeight = if (itemHeightPx > 0) {
+                                    (with(density) { itemHeightPx.toDp() } - stackOverlap)
+                                        .coerceAtLeast(SwipeActionSize + 12.dp)
+                                } else {
+                                    SwipeActionSize + 12.dp
+                                }
+                                SwipeActions(
+                                    archived = card.archived,
+                                    stripHeight = stripHeight,
+                                    progress = {
+                                        (-swipeState.offset / swipeRevealPx).coerceIn(0f, 1f)
                                     },
-                            )
-                            ExpiryBadge(card)
+                                    onEdit = {
+                                        openSwipeId = null
+                                        onEdit(card.id)
+                                    },
+                                    onArchive = {
+                                        openSwipeId = null
+                                        archiveCard(card)
+                                    },
+                                    onDelete = { confirmDeleteCard = card },
+                                    modifier = Modifier.align(Alignment.TopEnd),
+                                )
+                            }
+                            Box(
+                                Modifier
+                                    .offset { IntOffset(swipeState.offset.roundToInt(), 0) }
+                                    // 阴影挂在滑层上，跟着卡片走，不残留在原位
+                                    .shadow(liftElevation, RoundedCornerShape(20.dp))
+                                    .anchoredDraggable(
+                                        state = swipeState,
+                                        orientation = Orientation.Horizontal,
+                                        enabled = draggingId == null,
+                                    )
+                                    .clickable {
+                                        if (openSwipeId != null || swipeExposed) {
+                                            // 有卡展开时，第一次点击只负责收起
+                                            openSwipeId = null
+                                            scope.launch { swipeState.animateTo(SwipeAnchor.Closed) }
+                                        } else {
+                                            detailCard = card
+                                            showDetail = true
+                                        }
+                                    }
+                                    // 左滑手势对读屏不可见：操作以自定义无障碍动作暴露
+                                    .semantics {
+                                        customActions = listOf(
+                                            CustomAccessibilityAction("编辑") {
+                                                onEdit(card.id); true
+                                            },
+                                            CustomAccessibilityAction(
+                                                if (card.archived) "取消归档" else "归档"
+                                            ) {
+                                                archiveCard(card); true
+                                            },
+                                            CustomAccessibilityAction("删除") {
+                                                confirmDeleteCard = card; true
+                                            },
+                                        )
+                                    }
+                            ) {
+                                BankCardFront(
+                                    card = card,
+                                    preset = preset,
+                                    masked = settings.maskNumbers,
+                                    statusBadge = { ExpiryBadge(card, uiState.noticeDays) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(1.586f),
+                                )
+                            }
                         }
                     }
                 }
@@ -450,7 +609,8 @@ fun HomeScreen(
         }
     }
 
-    // 弹出详情：缩放 + 淡入动画，卡片可点击翻转，字段点击复制
+    // 弹出详情：缩放 + 淡入动画，卡片可点击翻转，字段点击复制。
+    // 编辑/归档/删除已移至列表左滑操作区，详情只负责查看与复制。
     AnimatedVisibility(
         visible = showDetail && liveDetail != null,
         enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.85f, animationSpec = tween(260)),
@@ -462,34 +622,29 @@ fun HomeScreen(
                 container = container,
                 settings = settings,
                 onDismiss = { showDetail = false },
-                onEdit = {
-                    showDetail = false
-                    onEdit(card.id)
-                },
-                onArchive = {
-                    val target = !card.archived
-                    vm.setArchived(card, target)
-                    showDetail = false
-                    scope.launch {
-                        snackbarHostState.showSnackbar(
-                            if (target) "已归档，可在「已归档」分类中找到" else "已取消归档"
-                        )
-                    }
-                },
-                onDelete = {
-                    vm.delete(card)
-                    showDetail = false
-                    scope.launch {
-                        val result = snackbarHostState.showSnackbar(
-                            message = "已删除「${card.bankName.ifBlank { "银行卡" }} •••• ${card.number.takeLast(4)}」",
-                            actionLabel = "撤销",
-                            duration = SnackbarDuration.Long,
-                        )
-                        if (result == SnackbarResult.ActionPerformed) vm.restore(card)
-                    }
-                },
             )
         }
+    }
+
+    // 左滑删除的二次确认；取消则操作区保持展开
+    confirmDeleteCard?.let { card ->
+        AlertDialog(
+            onDismissRequest = { confirmDeleteCard = null },
+            title = { Text("删除这张卡？") },
+            text = { Text("将从本机永久删除「${card.bankName.ifBlank { "银行卡" }} •••• ${card.number.takeLast(4)}」，无法恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDeleteCard = null
+                    openSwipeId = null
+                    deleteCard(card)
+                }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteCard = null }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -501,9 +656,10 @@ private fun List<CardEntity>.move(from: Int, to: Int): List<CardEntity> {
     return copy
 }
 
+/** 到期状态角标：内嵌在卡面顶行，跟随左滑一起移动；noticeDays 与筛选计数共用同一设置 */
 @Composable
-private fun androidx.compose.foundation.layout.BoxScope.ExpiryBadge(card: CardEntity) {
-    val status = CardValidation.expiryStatus(card.expiryMonth, card.expiryYear)
+private fun ExpiryBadge(card: CardEntity, noticeDays: Int) {
+    val status = CardValidation.expiryStatus(card.expiryMonth, card.expiryYear, noticeDays)
     val (text, color) = when (status) {
         CardValidation.ExpiryStatus.EXPIRED -> "已过期" to Color(0xFFB3261E)
         CardValidation.ExpiryStatus.EXPIRING -> {
@@ -512,20 +668,151 @@ private fun androidx.compose.foundation.layout.BoxScope.ExpiryBadge(card: CardEn
         }
         else -> return
     }
-    Surface(
-        color = color,
-        shape = RoundedCornerShape(8.dp),
-        modifier = Modifier
-            .align(Alignment.TopEnd)
-            .padding(top = 14.dp, end = 14.dp),
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(color)
+            .padding(horizontal = 7.dp, vertical = 3.dp)
     ) {
         Text(
             text,
             color = Color.White,
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            maxLines = 1,
         )
+    }
+}
+
+/** 单行胶囊搜索框：占位不换行、可清空，高度紧凑，键盘动作为「搜索」 */
+@Composable
+private fun SearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val focusManager = LocalFocusManager.current
+    val shape = RoundedCornerShape(23.dp)
+    Row(
+        modifier
+            .height(46.dp)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f), shape)
+            .padding(start = 14.dp, end = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.Search,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+            if (value.isEmpty()) {
+                Text(
+                    "搜索持卡人 / 银行 / 卡号",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                singleLine = true,
+                textStyle = LocalTextStyle.current.copy(
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                ),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (value.isNotEmpty()) {
+            IconButton(onClick = { onValueChange("") }, modifier = Modifier.size(34.dp)) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "清空搜索",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 左滑露出的操作钮组：编辑 / 归档 / 删除（删除放最外侧），随滑动进度淡入放大 */
+@Composable
+private fun SwipeActions(
+    archived: Boolean,
+    stripHeight: Dp,
+    progress: () -> Float,
+    onEdit: () -> Unit,
+    onArchive: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier
+            .height(stripHeight)
+            .graphicsLayer {
+                val p = progress()
+                alpha = p
+                val scale = 0.7f + 0.3f * p
+                scaleX = scale
+                scaleY = scale
+                transformOrigin = TransformOrigin(1f, 0.5f)
+            }
+            .padding(end = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SwipeActionButton(
+            icon = Icons.Filled.Edit,
+            label = "编辑",
+            container = MaterialTheme.colorScheme.primaryContainer,
+            content = MaterialTheme.colorScheme.onPrimaryContainer,
+            onClick = onEdit,
+        )
+        SwipeActionButton(
+            icon = if (archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+            label = if (archived) "取消归档" else "归档",
+            container = MaterialTheme.colorScheme.surfaceVariant,
+            content = MaterialTheme.colorScheme.onSurfaceVariant,
+            onClick = onArchive,
+        )
+        SwipeActionButton(
+            icon = Icons.Filled.Delete,
+            label = "删除",
+            container = MaterialTheme.colorScheme.error,
+            content = MaterialTheme.colorScheme.onError,
+            onClick = onDelete,
+        )
+    }
+}
+
+@Composable
+private fun SwipeActionButton(
+    icon: ImageVector,
+    label: String,
+    container: Color,
+    content: Color,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(SwipeActionSize)
+            .clip(CircleShape)
+            .background(container)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = label, tint = content, modifier = Modifier.size(20.dp))
     }
 }
 
@@ -607,15 +894,11 @@ private fun CardDetailOverlay(
     container: AppContainer,
     settings: AppSettings,
     onDismiss: () -> Unit,
-    onEdit: () -> Unit,
-    onArchive: () -> Unit,
-    onDelete: () -> Unit,
 ) {
     val context = LocalContext.current
     var flipped by remember(card.id) { mutableStateOf(false) }
     // 详情默认打码，防止旁人窥屏；点眼睛切换。复制始终复制真实值。
     var revealed by remember(card.id) { mutableStateOf(false) }
-    var confirmDelete by remember { mutableStateOf(false) }
     val brand = CardBrand.fromName(card.brand)
     val preset = CardStyles.resolve(card.styleId, card.bankCode, brand)
 
@@ -626,7 +909,7 @@ private fun CardDetailOverlay(
         container.clipboardHelper.copy(context, label, value, settings.clipboardClearSeconds)
     }
 
-    androidx.compose.foundation.layout.Box(
+    Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = 0.62f))
@@ -636,13 +919,13 @@ private fun CardDetailOverlay(
                 onClick = onDismiss,
             )
     ) {
-        // 点空白关闭：滚动列本身承担关闭点击；卡片、信息面板、按钮各自消费自己的点击。
+        // 点空白关闭：滚动列本身承担关闭点击；卡片、信息面板各自消费自己的点击。
         // （旧实现在滚动列上放了占满全屏的空拦截层，导致只有边缝能点中关闭）
         Column(
             Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
-                .padding(20.dp)
+                .padding(horizontal = 20.dp, vertical = 24.dp)
                 .verticalScroll(rememberScrollState())
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
@@ -650,8 +933,9 @@ private fun CardDetailOverlay(
                     onClick = onDismiss,
                 ),
             horizontalAlignment = Alignment.CenterHorizontally,
+            // 操作按钮移除后内容变短：不足一屏时垂直居中，超出仍可滚动
+            verticalArrangement = Arrangement.Center,
         ) {
-            Spacer(Modifier.height(16.dp))
             FlippableBankCard(
                 card = card,
                 preset = preset,
@@ -717,78 +1001,32 @@ private fun CardDetailOverlay(
                 }
             }
 
-            Spacer(Modifier.height(16.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Button(
-                    onClick = onEdit,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Filled.Edit, contentDescription = null, Modifier.size(17.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("编辑")
-                }
-                Button(
-                    onClick = { confirmDelete = true },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError,
-                    ),
-                ) {
-                    Icon(Icons.Filled.Delete, contentDescription = null, Modifier.size(17.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("删除")
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedButton(
-                    onClick = onArchive,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                    border = BorderStroke(1.2.dp, Color.White.copy(alpha = 0.75f)),
-                ) {
-                    Icon(
-                        if (card.archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
-                        contentDescription = null,
-                        Modifier.size(17.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (card.archived) "取消归档" else "归档")
-                }
-                OutlinedButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                    border = BorderStroke(1.2.dp, Color.White.copy(alpha = 0.75f)),
-                ) {
-                    Text("关闭")
-                }
-            }
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "编辑、归档或删除：回到列表左滑卡片",
+                color = Color.White.copy(alpha = 0.45f),
+                fontSize = 11.sp,
+            )
         }
-    }
-
-    if (confirmDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            title = { Text("删除这张卡？") },
-            text = { Text("将从本机永久删除「${card.bankName.ifBlank { "银行卡" }} •••• ${card.number.takeLast(4)}」，无法恢复。") },
-            confirmButton = {
-                TextButton(onClick = { confirmDelete = false; onDelete() }) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmDelete = false }) { Text("取消") }
-            },
-        )
+        // 关闭钮悬浮在右上角（状态栏安全区内）；点空白、返回键同样可关闭
+        Box(
+            Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(top = 8.dp, end = 20.dp)
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.16f))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = "关闭",
+                tint = Color.White,
+                modifier = Modifier.size(20.dp),
+            )
+        }
     }
 }
 

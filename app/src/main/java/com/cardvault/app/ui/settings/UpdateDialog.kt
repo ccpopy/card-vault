@@ -93,6 +93,7 @@ fun UpdateAvailableDialog(
                         version = info.latestVersion,
                         currentVersion = currentVersion,
                         sizeBytes = info.assetSizeBytes,
+                        assetName = info.assetName,
                     )
 
                     Column(Modifier.padding(horizontal = 24.dp)) {
@@ -169,7 +170,12 @@ fun UpdateAvailableDialog(
 
 /** 渐变卡头：版本号像卡面浮雕数字，叠一道静态斜向流光 */
 @Composable
-private fun UpdateHeader(version: String, currentVersion: String, sizeBytes: Long) {
+private fun UpdateHeader(
+    version: String,
+    currentVersion: String,
+    sizeBytes: Long,
+    assetName: String,
+) {
     val cs = MaterialTheme.colorScheme
     val base = Brush.linearGradient(
         listOf(cs.primary, lerp(cs.primary, Color.Black, 0.22f)),
@@ -211,6 +217,10 @@ private fun UpdateHeader(version: String, currentVersion: String, sizeBytes: Lon
                     if (sizeBytes > 0) {
                         append(" · ")
                         append(formatMb(sizeBytes))
+                    }
+                    formatAbi(assetName)?.let { abi ->
+                        append(" · ")
+                        append(abi)
                     }
                 },
                 fontSize = 12.sp,
@@ -415,3 +425,12 @@ private fun parseInline(text: String): AnnotatedString {
 }
 
 private fun formatMb(bytes: Long): String = "%.1f MB".format(bytes / 1024.0 / 1024.0)
+
+private fun formatAbi(assetName: String): String? = when {
+    assetName.contains("_arm64-v8a.apk") -> "arm64-v8a"
+    assetName.contains("_armeabi-v7a.apk") -> "armeabi-v7a"
+    assetName.contains("_x86_64.apk") -> "x86_64"
+    assetName.contains("_x86.apk") -> "x86"
+    assetName.contains("_universal.apk") -> "universal"
+    else -> null
+}

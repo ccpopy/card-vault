@@ -14,6 +14,7 @@ import com.cardvault.app.network.AppUpdateInfo
 import com.cardvault.app.network.UpdateCheckResult
 import com.cardvault.app.network.UpdateService
 import com.cardvault.app.notifications.ExpiryNotificationScheduler
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -88,7 +89,8 @@ class SettingsViewModel(
     fun checkUpdate() {
         viewModelScope.launch {
             updateState = AppUpdateState.Checking
-            updateService.check()
+            val proxyUrl = settingsRepo.settings.first().proxyUrl.ifBlank { null }
+            updateService.check(proxyUrl)
                 .onSuccess { result ->
                     updateState = when (result) {
                         is UpdateCheckResult.Available -> AppUpdateState.Available(result.info)
@@ -108,7 +110,8 @@ class SettingsViewModel(
         viewModelScope.launch {
             updateState = AppUpdateState.Downloading(info, 0L, info.assetSizeBytes)
             val target = File(appContext.cacheDir, "updates/CardVault-${info.latestVersion}.apk")
-            updateService.downloadApk(info.downloadUrl, target) { downloaded, total ->
+            val proxyUrl = settingsRepo.settings.first().proxyUrl.ifBlank { null }
+            updateService.downloadApk(info.downloadUrl, target, proxyUrl) { downloaded, total ->
                 val current = updateState
                 if (current is AppUpdateState.Downloading) {
                     updateState = current.copy(

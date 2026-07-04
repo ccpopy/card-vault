@@ -1,5 +1,6 @@
 package com.cardvault.app.network
 
+import android.os.Build
 import com.cardvault.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -16,6 +17,7 @@ data class AppUpdateInfo(
     val releaseNotes: String,
     val releasePageUrl: String,
     val assetSizeBytes: Long,
+    val assetName: String,
 )
 
 sealed interface UpdateCheckResult {
@@ -24,11 +26,13 @@ sealed interface UpdateCheckResult {
 }
 
 class UpdateService {
-    suspend fun check(): Result<UpdateCheckResult> = withContext(Dispatchers.IO) {
+    suspend fun check(proxyUrl: String?): Result<UpdateCheckResult> = withContext(Dispatchers.IO) {
         runCatching {
-            val client = buildClient()
+            val hasProxy = !proxyUrl.isNullOrBlank()
+            val client = buildClient(proxyUrl.takeIf { hasProxy })
+            val apiUrl = if (hasProxy) GITHUB_LATEST_RELEASE_API else mirror(GITHUB_LATEST_RELEASE_API)
             val request = Request.Builder()
-                .url(GITHUB_LATEST_RELEASE_API)
+                .url(apiUrl)
                 .header("Accept", "application/vnd.github+json")
                 .build()
             client.newCall(request).execute().use { response ->
@@ -36,17 +40,22 @@ class UpdateService {
                 val json = JSONObject(response.body?.string().orEmpty())
                 val tag = json.getString("tag_name")
                 val latestVersion = tag.removePrefix("v")
-                val asset = findUniversalApk(json, latestVersion)
+                val asset = findBestApk(json, latestVersion)
+                val downloadUrl = if (hasProxy) asset.url else mirror(asset.url)
+                val releasePageUrl = json.optString("html_url").let { url ->
+                    if (hasProxy || url.isBlank()) url else mirror(url)
+                }
 
                 if (isNewerVersion(latestVersion, BuildConfig.VERSION_NAME)) {
                     UpdateCheckResult.Available(
                         AppUpdateInfo(
                             latestVersion = latestVersion,
                             tagName = tag,
-                            downloadUrl = asset.url,
+                            downloadUrl = downloadUrl,
                             releaseNotes = json.optString("body").trim(),
-                            releasePageUrl = json.optString("html_url"),
+                            releasePageUrl = releasePageUrl,
                             assetSizeBytes = asset.sizeBytes,
+                            assetName = asset.name,
                         )
                     )
                 } else {
@@ -63,10 +72,11 @@ class UpdateService {
     suspend fun downloadApk(
         url: String,
         destination: File,
+        proxyUrl: String?,
         onProgress: (downloaded: Long, total: Long) -> Unit,
     ): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
-            val client = buildDownloadClient()
+            val client = buildDownloadClient(proxyUrl)
             val request = Request.Builder().url(url).build()
             client.newCall(request).execute().use { response ->
                 check(response.isSuccessful) { "下载失败：HTTP ${response.code}" }
@@ -100,36 +110,51 @@ class UpdateService {
         }
     }
 
-    private fun buildClient(): OkHttpClient =
-        OkHttpClient.Builder()
+    private fun buildClient(proxyUrl: String?): OkHttpClient {
+        val builder = OkHttpClient.Builder()
             .connectTimeout(12, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
-            .build()
+        BinLookupService.parseProxy(proxyUrl)?.let { builder.proxy(it) }
+        return builder.build()
+    }
 
-    private fun buildDownloadClient(): OkHttpClient =
-        OkHttpClient.Builder()
+    private fun buildDownloadClient(proxyUrl: String?): OkHttpClient {
+        val builder = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)
-            .build()
+        BinLookupService.parseProxy(proxyUrl)?.let { builder.proxy(it) }
+        return builder.build()
+    }
 
-    private data class ApkAsset(val url: String, val sizeBytes: Long)
+    private data class ApkAsset(val name: String, val url: String, val sizeBytes: Long, val abi: String?)
 
-    private fun findUniversalApk(json: JSONObject, latestVersion: String): ApkAsset {
+    private fun findBestApk(json: JSONObject, latestVersion: String): ApkAsset {
         val assets = json.getJSONArray("assets")
+        val apkAssets = mutableListOf<ApkAsset>()
         var firstApk: ApkAsset? = null
         for (index in 0 until assets.length()) {
             val asset = assets.getJSONObject(index)
             val name = asset.optString("name")
             val url = asset.optString("browser_download_url")
             if (!name.endsWith(".apk") || url.isBlank()) continue
-            val candidate = ApkAsset(url, asset.optLong("size", -1L))
+            val candidate = ApkAsset(
+                name = name,
+                url = url,
+                sizeBytes = asset.optLong("size", -1L),
+                abi = abiFromAssetName(name),
+            )
             if (firstApk == null) firstApk = candidate
-            if (name == "CardVault_${latestVersion}_universal.apk" || name.contains("_universal.apk")) {
-                return candidate
-            }
+            apkAssets += candidate
         }
+        val supportedAbis = Build.SUPPORTED_ABIS.toList()
+        supportedAbis.forEach { abi ->
+            apkAssets.firstOrNull { it.abi == abi }?.let { return it }
+        }
+        apkAssets.firstOrNull {
+            it.name == "CardVault_${latestVersion}_universal.apk" || it.abi == ABI_UNIVERSAL
+        }?.let { return it }
         return firstApk ?: error("最新版本未提供 APK 安装包")
     }
 
@@ -150,8 +175,23 @@ class UpdateService {
             part.takeWhile { it.isDigit() }.takeIf { it.isNotEmpty() }?.toInt()
         }
 
+    private fun abiFromAssetName(name: String): String? =
+        APK_ABIS.firstOrNull { abi -> name.contains("_$abi.apk") }
+
+    private fun mirror(url: String): String =
+        if (url.startsWith(MIRROR_PREFIX)) url else "$MIRROR_PREFIX$url"
+
     companion object {
         private const val GITHUB_LATEST_RELEASE_API =
             "https://api.github.com/repos/ccpopy/card-vault/releases/latest"
+        private const val MIRROR_PREFIX = "https://gh.lessdo.top/"
+        private const val ABI_UNIVERSAL = "universal"
+        private val APK_ABIS = listOf(
+            "arm64-v8a",
+            "armeabi-v7a",
+            "x86_64",
+            "x86",
+            ABI_UNIVERSAL,
+        )
     }
 }

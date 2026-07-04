@@ -25,6 +25,7 @@ if ($InitEnv) {
     $releasePassword = New-RandomSecret
     @(
         '# Local release signing config. Do not commit this file.',
+        'ANDROID_KEYSTORE_FILE=release-signing/cardvault-release.p12',
         "ANDROID_KEYSTORE_PASSWORD=$releasePassword",
         "ANDROID_KEY_PASSWORD=$releasePassword",
         'ANDROID_KEY_ALIAS=cardvault',

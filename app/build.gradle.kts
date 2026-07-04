@@ -22,8 +22,8 @@ android {
         applicationId = "com.cardvault.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.1.3"
+        versionCode = 7
+        versionName = "1.1.4"
     }
 
     signingConfigs {
@@ -39,7 +39,7 @@ android {
                 alias != null &&
                 keyPasswordValue != null
             ) {
-                storeFile = file(keystoreFile)
+                storeFile = rootProject.file(keystoreFile)
                 storePassword = keystorePassword
                 keyAlias = alias
                 keyPassword = keyPasswordValue

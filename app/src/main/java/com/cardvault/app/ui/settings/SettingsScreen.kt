@@ -78,12 +78,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.cardvault.app.BuildConfig
 import com.cardvault.app.data.AppSettings
 import com.cardvault.app.network.BinLookupService
 import com.cardvault.app.security.PinManager
+import com.cardvault.app.update.ApkInstaller
 import com.cardvault.app.ui.lock.PinSetupScreen
 import com.cardvault.app.ui.lock.canUseBiometric
 import com.cardvault.app.ui.lock.verifyBiometric
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -149,11 +152,28 @@ fun SettingsScreen(
         }
     }
 
+    // 从「未知来源」授权页返回后，若已下载完成则继续安装
+    val installLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) {
+        val s = vm.updateState
+        if (s is AppUpdateState.ReadyToInstall && ApkInstaller.canInstallPackages(context)) {
+            ApkInstaller.install(context, File(s.apkPath))
+        }
+    }
+
+    fun launchInstall(path: String) {
+        if (ApkInstaller.canInstallPackages(context)) {
+            ApkInstaller.install(context, File(path))
+        } else {
+            installLauncher.launch(ApkInstaller.unknownSourcesSettingsIntent(context))
+        }
+    }
+
     val updateState = vm.updateState
     LaunchedEffect(updateState) {
-        if (updateState is AppUpdateState.OpenDownload) {
-            uriHandler.openUri(updateState.info.downloadUrl)
-            vm.markUpdateDownloadOpened(updateState.info)
+        if (updateState is AppUpdateState.ReadyToInstall) {
+            launchInstall(updateState.apkPath)
         }
     }
 
@@ -371,7 +391,7 @@ fun SettingsScreen(
                 SettingRow(
                     icon = Icons.Filled.SystemUpdate,
                     title = "检查更新",
-                    subtitle = "打开 GitHub 官方 APK 下载链接",
+                    subtitle = "在应用内下载并安装新版本",
                     enabled = vm.updateState != AppUpdateState.Checking,
                     onClick = { vm.checkUpdate() },
                 ) {
@@ -396,7 +416,7 @@ fun SettingsScreen(
                             )
                         }
                     }
-                    is AppUpdateState.Done -> StatusLine(
+                    is AppUpdateState.UpToDate -> StatusLine(
                         state.message,
                         MaterialTheme.colorScheme.primary,
                         Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
@@ -467,7 +487,7 @@ fun SettingsScreen(
                 Text(
                     "· 卡片数据仅存储于本机，采用 SQLCipher（AES-256）加密，密钥由系统 Keystore 保护。\n" +
                         "· 应用内不包含统计、广告或后台上报组件。\n" +
-                        "· 网络请求仅发生在手动触发的 BIN 查询与代理连通性测试；BIN 查询仅发送卡号前 8 位。",
+                        "· 网络请求仅发生在手动触发的 BIN 查询、代理连通性测试与版本检查；BIN 查询仅发送卡号前 8 位。",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 19.sp,
@@ -477,7 +497,7 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(24.dp))
             Text(
-                "CardVault 1.1.0",
+                "CardVault ${BuildConfig.VERSION_NAME}",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -547,6 +567,21 @@ fun SettingsScreen(
                 showPinSetup = false
             },
             onCancel = { showPinSetup = false },
+        )
+    }
+
+    if (
+        updateState is AppUpdateState.Available ||
+        updateState is AppUpdateState.Downloading ||
+        updateState is AppUpdateState.ReadyToInstall
+    ) {
+        UpdateAvailableDialog(
+            state = updateState,
+            currentVersion = BuildConfig.VERSION_NAME,
+            onDownload = { info -> vm.downloadUpdate(info) },
+            onInstall = { path -> launchInstall(path) },
+            onOpenInBrowser = { info -> uriHandler.openUri(info.releasePageUrl) },
+            onDismiss = { vm.dismissUpdate() },
         )
     }
 }

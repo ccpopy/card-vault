@@ -1,5 +1,6 @@
 package com.cardvault.app.ui.settings
 
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,6 +15,7 @@ import com.cardvault.app.network.UpdateCheckResult
 import com.cardvault.app.network.UpdateService
 import com.cardvault.app.notifications.ExpiryNotificationScheduler
 import kotlinx.coroutines.launch
+import java.io.File
 
 sealed interface ProxyTestState {
     data object Idle : ProxyTestState
@@ -32,12 +34,19 @@ sealed interface BackupState {
 sealed interface AppUpdateState {
     data object Idle : AppUpdateState
     data object Checking : AppUpdateState
-    data class OpenDownload(val info: AppUpdateInfo) : AppUpdateState
-    data class Done(val message: String) : AppUpdateState
+    data class Available(val info: AppUpdateInfo) : AppUpdateState
+    data class Downloading(
+        val info: AppUpdateInfo,
+        val downloadedBytes: Long,
+        val totalBytes: Long,
+    ) : AppUpdateState
+    data class ReadyToInstall(val info: AppUpdateInfo, val apkPath: String) : AppUpdateState
+    data class UpToDate(val message: String) : AppUpdateState
     data class Error(val message: String) : AppUpdateState
 }
 
 class SettingsViewModel(
+    private val appContext: Context,
     private val settingsRepo: SettingsRepository,
     private val binService: BinLookupService,
     private val updateService: UpdateService,
@@ -82,8 +91,8 @@ class SettingsViewModel(
             updateService.check()
                 .onSuccess { result ->
                     updateState = when (result) {
-                        is UpdateCheckResult.Available -> AppUpdateState.OpenDownload(result.info)
-                        is UpdateCheckResult.UpToDate -> AppUpdateState.Done(
+                        is UpdateCheckResult.Available -> AppUpdateState.Available(result.info)
+                        is UpdateCheckResult.UpToDate -> AppUpdateState.UpToDate(
                             "已是最新版本 ${result.currentVersion}"
                         )
                     }
@@ -94,8 +103,35 @@ class SettingsViewModel(
         }
     }
 
-    fun markUpdateDownloadOpened(info: AppUpdateInfo) {
-        updateState = AppUpdateState.Done("已打开 ${info.latestVersion} 下载页面")
+    fun downloadUpdate(info: AppUpdateInfo) {
+        if (updateState is AppUpdateState.Downloading) return
+        viewModelScope.launch {
+            updateState = AppUpdateState.Downloading(info, 0L, info.assetSizeBytes)
+            val target = File(appContext.cacheDir, "updates/CardVault-${info.latestVersion}.apk")
+            updateService.downloadApk(info.downloadUrl, target) { downloaded, total ->
+                val current = updateState
+                if (current is AppUpdateState.Downloading) {
+                    updateState = current.copy(
+                        downloadedBytes = downloaded,
+                        totalBytes = if (total > 0) total else current.totalBytes,
+                    )
+                }
+            }
+                .onSuccess { file ->
+                    if (updateState is AppUpdateState.Downloading) {
+                        updateState = AppUpdateState.ReadyToInstall(info, file.absolutePath)
+                    }
+                }
+                .onFailure {
+                    if (updateState is AppUpdateState.Downloading) {
+                        updateState = AppUpdateState.Error(it.message ?: "下载失败")
+                    }
+                }
+        }
+    }
+
+    fun dismissUpdate() {
+        updateState = AppUpdateState.Idle
     }
 
     fun exportBackup(uri: Uri, password: String) {

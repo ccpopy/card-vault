@@ -11,7 +11,7 @@ class NfcCardReader {
         try {
             val aid = selectPaymentApplication(isoDep)
             val selected = transceiveOk(isoDep, selectAid(aid))
-            val gpo = getProcessingOptions(isoDep, selected)
+            val gpo = getProcessingOptions(isoDep, aid, selected)
             val records = readRecords(isoDep, gpo)
             val tlvs = records.flatMap { parseTlvs(it) }
             val pan = tlvs.firstValue(0x5A)?.toHexDigits()
@@ -44,23 +44,105 @@ class NfcCardReader {
         error("未找到可读取的银行卡应用")
     }
 
-    private fun getProcessingOptions(isoDep: IsoDep, selectedAidResponse: ByteArray): ByteArray {
+    private fun getProcessingOptions(
+        isoDep: IsoDep,
+        aid: ByteArray,
+        selectedAidResponse: ByteArray,
+    ): ByteArray {
         val pdol = parseTlvs(selectedAidResponse).firstValue(0x9F38)
-        val data = if (pdol == null) {
-            byteArrayOf(0x83.toByte(), 0x00)
+
+        val first = tryGpo(isoDep, buildGpoField(pdol, TTQ_PRIMARY))
+        if (first.data != null) return first.data
+
+        // 部分卡片（尤其 Visa payWave）在首组终端参数下拒绝，重新选中应用复位状态后换一组 TTQ 再试一次
+        val second = if (pdol != null && runCatching { transceiveOk(isoDep, selectAid(aid)) }.isSuccess) {
+            tryGpo(isoDep, buildGpoField(pdol, TTQ_ALTERNATE))
         } else {
-            val pdolData = ByteArray(pdolDataLength(pdol))
-            byteArrayOf(0x83.toByte(), pdolData.size.toByte()) + pdolData
+            null
         }
-        val apdu = byteArrayOf(
-            0x80.toByte(),
-            0xA8.toByte(),
-            0x00,
-            0x00,
-            data.size.toByte(),
-        ) + data + byteArrayOf(0x00)
-        return transceiveOk(isoDep, apdu)
+        if (second?.data != null) return second.data
+
+        val status = second?.status ?: first.status
+        if (status == "6985") {
+            error("该银行卡未开放 NFC 读取（状态码 6985）。部分银行卡默认关闭非接触读取，请改用手动录入。")
+        }
+        error("NFC 卡片拒绝读取，状态码 $status")
     }
+
+    private fun tryGpo(isoDep: IsoDep, field: ByteArray): GpoResult {
+        val apdu = byteArrayOf(0x80.toByte(), 0xA8.toByte(), 0x00, 0x00, field.size.toByte()) +
+            field + byteArrayOf(0x00)
+        val response = isoDep.transceive(apdu)
+        if (response.size < 2) return GpoResult(null, "空响应")
+        val sw1 = response[response.lastIndex - 1].toInt() and 0xFF
+        val sw2 = response[response.lastIndex].toInt() and 0xFF
+        val status = "%02X%02X".format(sw1, sw2)
+        return if (sw1 == 0x90 && sw2 == 0x00) {
+            GpoResult(response.copyOfRange(0, response.size - 2), status)
+        } else {
+            GpoResult(null, status)
+        }
+    }
+
+    /** 组装 GPO 的命令模板（tag 83）。无 PDOL 时为 83 00，有则按需填充终端数据 */
+    private fun buildGpoField(pdol: ByteArray?, ttq: ByteArray): ByteArray {
+        val pdolData = if (pdol == null) ByteArray(0) else buildPdolData(pdol, ttq)
+        return byteArrayOf(0x83.toByte(), pdolData.size.toByte()) + pdolData
+    }
+
+    /**
+     * 按卡片 PDOL 请求逐项填充真实终端数据。全零会导致很多卡在 GPO 阶段返回 6985，
+     * 关键在于给出有效的 TTQ（9F66）、国家/货币代码、交易日期与不可预知数。
+     */
+    private fun buildPdolData(pdol: ByteArray, ttq: ByteArray): ByteArray {
+        val out = ArrayList<Byte>(pdol.size)
+        var index = 0
+        while (index < pdol.size) {
+            val tagStart = index
+            index = skipTag(pdol, index)
+            if (index >= pdol.size) break
+            val tag = pdol.copyOfRange(tagStart, index).toTagInt()
+            val length = pdol[index].toInt() and 0xFF
+            index++
+            fitToLength(defaultForTag(tag, length, ttq), length).forEach { out.add(it) }
+        }
+        return out.toByteArray()
+    }
+
+    private fun defaultForTag(tag: Int, length: Int, ttq: ByteArray): ByteArray = when (tag) {
+        0x9F66 -> ttq                                              // TTQ 终端交易属性
+        0x9F1A -> byteArrayOf(0x01, 0x56)                          // 终端国家代码 156（中国）
+        0x5F2A -> byteArrayOf(0x01, 0x56)                          // 交易货币代码 156（CNY）
+        0x9F02 -> byteArrayOf(0x00, 0x00, 0x00, 0x00, 0x01, 0x00)  // 授权金额 1.00（避免零金额被拒）
+        0x9A -> currentDateBcd()                                   // 交易日期 YYMMDD
+        0x9C -> byteArrayOf(0x00)                                  // 交易类型：消费
+        0x9F37 -> randomBytes(if (length > 0) length else 4)       // 不可预知数
+        0x9F35 -> byteArrayOf(0x22)                                // 终端类型
+        0x9F33 -> byteArrayOf(0x60, 0x08, 0x08)                    // 终端能力
+        0x9F40 -> byteArrayOf(0x60, 0x00, 0x00, 0x00, 0x00)        // 附加终端能力
+        else -> ByteArray(length)                                  // 其余项按请求长度置零
+    }
+
+    private fun fitToLength(value: ByteArray, length: Int): ByteArray = when {
+        length <= 0 -> ByteArray(0)
+        value.size == length -> value
+        value.size > length -> value.copyOfRange(0, length)
+        else -> value + ByteArray(length - value.size)
+    }
+
+    private fun currentDateBcd(): ByteArray {
+        val cal = java.util.Calendar.getInstance()
+        return byteArrayOf(
+            toBcd(cal.get(java.util.Calendar.YEAR) % 100),
+            toBcd(cal.get(java.util.Calendar.MONTH) + 1),
+            toBcd(cal.get(java.util.Calendar.DAY_OF_MONTH)),
+        )
+    }
+
+    private fun toBcd(value: Int): Byte = (((value / 10) shl 4) or (value % 10)).toByte()
+
+    private fun randomBytes(count: Int): ByteArray =
+        ByteArray(count).also { kotlin.random.Random.nextBytes(it) }
 
     private fun readRecords(isoDep: IsoDep, gpo: ByteArray): List<ByteArray> {
         val afl = extractAfl(gpo) ?: error("NFC 卡片未返回 AFL 记录索引")
@@ -108,18 +190,6 @@ class NfcCardReader {
 
     private fun selectAid(aid: ByteArray): ByteArray =
         byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aid.size.toByte()) + aid + byteArrayOf(0x00)
-
-    private fun pdolDataLength(pdol: ByteArray): Int {
-        var index = 0
-        var length = 0
-        while (index < pdol.size) {
-            index = skipTag(pdol, index)
-            require(index < pdol.size) { "NFC PDOL 格式无效" }
-            length += pdol[index].toInt() and 0xFF
-            index++
-        }
-        return length
-    }
 
     private fun parseTlvs(bytes: ByteArray): List<Tlv> {
         val result = mutableListOf<Tlv>()
@@ -212,7 +282,13 @@ class NfcCardReader {
         val tagEnd: Int,
     )
 
+    private data class GpoResult(val data: ByteArray?, val status: String)
+
     companion object {
+        // TTQ（9F66）：告诉卡片终端支持的读取模式，全零会触发 6985
+        private val TTQ_PRIMARY = byteArrayOf(0x36, 0x00, 0x00, 0x00)
+        private val TTQ_ALTERNATE = byteArrayOf(0x27, 0x00, 0x00, 0x00)
+
         private val KNOWN_AIDS = listOf(
             "A000000333010101",
             "A0000000031010",

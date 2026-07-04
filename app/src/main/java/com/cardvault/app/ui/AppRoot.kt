@@ -145,6 +145,7 @@ private fun MainNavHost(container: AppContainer, settings: AppSettings) {
         composable("settings") {
             val vm: SettingsViewModel = viewModel {
                 SettingsViewModel(
+                    appContext = container.appContext,
                     settingsRepo = container.settingsRepository,
                     binService = container.binLookupService,
                     updateService = container.updateService,

@@ -1,6 +1,7 @@
 package com.cardvault.app
 
 import android.app.Application
+import android.content.Context
 import androidx.room.Room
 import com.cardvault.app.data.BackupManager
 import com.cardvault.app.data.CardDatabase
@@ -26,6 +27,8 @@ class CardVaultApp : Application() {
 
 /** 手动依赖容器（应用规模小，不引入 Hilt） */
 class AppContainer(private val app: Application) {
+
+    val appContext: Context get() = app
 
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 

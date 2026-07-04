@@ -86,12 +86,22 @@ jobs:
           done
           test -n "$(find release -name '*.apk' -print -quit)"
           (cd release && sha256sum *.apk > SHA256SUMS.txt)
+          notes_source=".github/release-notes/${tag}.md"
+          if [ -f "$notes_source" ]; then
+            cp "$notes_source" release/RELEASE_NOTES.md
+          else
+            {
+              echo "## ✨ 新增"
+              echo
+              echo "- 发布 ${tag} 签名安装包。"
+            } > release/RELEASE_NOTES.md
+          fi
           {
-            echo "Automated signed Android APK build for ${tag}."
             echo
-            echo "Assets:"
+            echo "## 📦 安装包"
+            echo
             find release -name '*.apk' -printf '%f\n' | sort | sed 's/^/- /'
-          } > release/RELEASE_NOTES.md
+          } >> release/RELEASE_NOTES.md
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

@@ -17,6 +17,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # tag 与 versionName 不一致会让线上用户陷入「永远提示有新版本」的死循环
+      - name: Verify tag matches versionName
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          gradle_version="$(sed -n 's/^[[:space:]]*versionName = "\(.*\)"$/\1/p' app/build.gradle.kts)"
+          if [ -z "$gradle_version" ]; then
+            echo "::error::Failed to read versionName from app/build.gradle.kts"
+            exit 1
+          fi
+          if [ "$tag_version" != "$gradle_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match versionName ${gradle_version} in app/build.gradle.kts"
+            exit 1
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:

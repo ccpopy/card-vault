@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -44,10 +45,15 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cardvault.app.data.CardEntity
@@ -328,17 +334,11 @@ fun BankCardFront(
                 }
             }
             Spacer(Modifier.height(10.dp))
-            Text(
+            CardNumberText(
                 text = if (masked) CardValidation.maskNumber(card.number)
                 else CardValidation.formatNumber(card.number, brand),
                 color = tint,
-                fontSize = 20.sp,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 2.sp,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(14.dp))
             Row(
@@ -371,6 +371,63 @@ fun BankCardFront(
                 }
             }
         }
+    }
+}
+
+private data class CardNumberTypography(
+    val fontSize: TextUnit,
+    val letterSpacing: TextUnit,
+)
+
+@Composable
+private fun CardNumberText(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier) {
+        val density = LocalDensity.current
+        val textMeasurer = rememberTextMeasurer()
+        val maxWidthPx = with(density) { maxWidth.toPx() }
+        val candidates = remember {
+            listOf(
+                CardNumberTypography(20.sp, 2.sp),
+                CardNumberTypography(19.sp, 1.4.sp),
+                CardNumberTypography(18.sp, 0.8.sp),
+                CardNumberTypography(17.sp, 0.3.sp),
+                CardNumberTypography(16.sp, 0.sp),
+                CardNumberTypography(15.sp, 0.sp),
+            )
+        }
+        val typography = remember(text, maxWidthPx) {
+            candidates.firstOrNull { candidate ->
+                val measured = textMeasurer.measure(
+                    text = AnnotatedString(text),
+                    style = TextStyle(
+                        fontSize = candidate.fontSize,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Medium,
+                        letterSpacing = candidate.letterSpacing,
+                    ),
+                    maxLines = 1,
+                    softWrap = false,
+                )
+                measured.size.width <= maxWidthPx
+            } ?: candidates.last()
+        }
+
+        Text(
+            text = text,
+            color = color,
+            fontSize = typography.fontSize,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = typography.letterSpacing,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

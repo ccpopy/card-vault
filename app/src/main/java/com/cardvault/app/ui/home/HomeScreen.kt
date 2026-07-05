@@ -102,6 +102,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
@@ -135,10 +136,13 @@ import com.cardvault.app.domain.CardStyles
 import com.cardvault.app.domain.CardValidation
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/** 左滑露出的操作区：圆形操作钮尺寸与展开总宽（3 钮 + 间距 + 边距） */
-private val SwipeActionSize = 44.dp
+/** 左滑露出的操作托盘：三枚 40dp 圆钮 + 10dp 间距/边距 = 托盘 160dp，另留 8dp 卡缝 */
+private val SwipeActionSize = 40.dp
+private val SwipeTrayWidth = 160.dp
 private val SwipeRevealWidth = 168.dp
 
 /** 卡片左滑的两个锚点：收起 / 露出操作区 */
@@ -390,6 +394,10 @@ fun HomeScreen(
                 LaunchedEffect(searchText, filter) {
                     openSwipeId = null
                     listState.scrollToItem(0)
+                    // 筛选结果经 Flow 异步回流，键控锚定会把位置从顶部拽走：
+                    // 等新数据集落地（combine 对筛选变化必有一次新发射）后再回顶一次
+                    snapshotFlow { uiState.cards }.drop(1).first()
+                    listState.scrollToItem(0)
                 }
                 LazyColumn(
                     state = listState,
@@ -531,14 +539,18 @@ fun HomeScreen(
                             // 操作钮固定在卡片的可见条带内（堆叠只露出顶部这一段），
                             // 收起时不参与组合，避免被无障碍焦点/误触碰到
                             if (swipeExposed) {
-                                val stripHeight = if (itemHeightPx > 0) {
-                                    (with(density) { itemHeightPx.toDp() } - stackOverlap)
-                                        .coerceAtLeast(SwipeActionSize + 12.dp)
-                                } else {
-                                    SwipeActionSize + 12.dp
+                                // 尾张没有下一张卡压住、是整张滑走：托盘吃满整卡高度；
+                                // 其余卡托盘只占堆叠露出的顶部条带
+                                val isLast = index == displayCards.lastIndex
+                                val stripHeight = when {
+                                    itemHeightPx <= 0 -> SwipeActionSize + 16.dp
+                                    isLast -> with(density) { itemHeightPx.toDp() }
+                                    else -> (with(density) { itemHeightPx.toDp() } - stackOverlap)
+                                        .coerceAtLeast(SwipeActionSize + 16.dp)
                                 }
                                 SwipeActions(
                                     archived = card.archived,
+                                    cardColors = preset.colors,
                                     stripHeight = stripHeight,
                                     progress = {
                                         (-swipeState.offset / swipeRevealPx).coerceIn(0f, 1f)
@@ -746,10 +758,15 @@ private fun SearchField(
     }
 }
 
-/** 左滑露出的操作钮组：编辑 / 归档 / 删除（删除放最外侧），随滑动进度淡入放大 */
+/**
+ * 左滑露出的操作托盘：编辑 / 归档 / 删除（删除放最外侧），随滑动进度淡入放大。
+ * 托盘底色取卡面自身配色加深近半——滑开后底下露出的是上一张卡的花色，内容不可控，
+ * 与其让按钮去适应，不如自带确定的深色底板：白钮对比稳定，托盘也延续本卡身份。
+ */
 @Composable
 private fun SwipeActions(
     archived: Boolean,
+    cardColors: List<Color>,
     stripHeight: Dp,
     progress: () -> Float,
     onEdit: () -> Unit,
@@ -757,7 +774,7 @@ private fun SwipeActions(
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    Box(
         modifier
             .height(stripHeight)
             .graphicsLayer {
@@ -767,32 +784,42 @@ private fun SwipeActions(
                 scaleX = scale
                 scaleY = scale
                 transformOrigin = TransformOrigin(1f, 0.5f)
-            }
-            .padding(end = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            },
+        contentAlignment = Alignment.CenterEnd,
     ) {
-        SwipeActionButton(
-            icon = Icons.Filled.Edit,
-            label = "编辑",
-            container = MaterialTheme.colorScheme.primaryContainer,
-            content = MaterialTheme.colorScheme.onPrimaryContainer,
-            onClick = onEdit,
-        )
-        SwipeActionButton(
-            icon = if (archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
-            label = if (archived) "取消归档" else "归档",
-            container = MaterialTheme.colorScheme.surfaceVariant,
-            content = MaterialTheme.colorScheme.onSurfaceVariant,
-            onClick = onArchive,
-        )
-        SwipeActionButton(
-            icon = Icons.Filled.Delete,
-            label = "删除",
-            container = MaterialTheme.colorScheme.error,
-            content = MaterialTheme.colorScheme.onError,
-            onClick = onDelete,
-        )
+        Row(
+            Modifier
+                .width(SwipeTrayWidth)
+                .height((stripHeight - 12.dp).coerceAtLeast(52.dp))
+                .clip(RoundedCornerShape(18.dp))
+                .background(Brush.linearGradient(cardColors))
+                .background(Color.Black.copy(alpha = 0.48f))
+                .padding(horizontal = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SwipeActionButton(
+                icon = Icons.Filled.Edit,
+                label = "编辑",
+                container = Color.White.copy(alpha = 0.16f),
+                content = Color.White,
+                onClick = onEdit,
+            )
+            SwipeActionButton(
+                icon = if (archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                label = if (archived) "取消归档" else "归档",
+                container = Color.White.copy(alpha = 0.16f),
+                content = Color.White,
+                onClick = onArchive,
+            )
+            SwipeActionButton(
+                icon = Icons.Filled.Delete,
+                label = "删除",
+                container = Color(0xFFD93A35),
+                content = Color.White,
+                onClick = onDelete,
+            )
+        }
     }
 }
 
